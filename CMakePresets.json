@@ -1,0 +1,25 @@
+{
+  "version": 3,
+  "configurePresets": [
+    {
+      "name": "default",
+      "binaryDir": ".build/default",
+      "displayName": "Default (development)",
+      "description": "Development configuration",
+      "cacheVariables": {
+        "SDKCONFIG_DEFAULTS": "sdkconfig.defaults",
+        "SDKCONFIG": "./.build/default/sdkconfig"
+      }
+    },
+    {
+      "name": "prod",
+      "binaryDir": ".build/prod",
+      "displayName": "Production",
+      "description": "Production configuration",
+      "cacheVariables": {
+        "SDKCONFIG_DEFAULTS": "sdkconfig.defaults;sdkconfig.defaults.prod",
+        "SDKCONFIG": "./.build/prod/sdkconfig"
+      }
+    }
+  ]
+}

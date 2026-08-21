@@ -1,0 +1,13 @@
+# Shared Config
+CONFIG_IDF_TARGET="esp32s3"
+CONFIG_IDF_TARGET_ESP32S3=y
+CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
+CONFIG_ESPTOOLPY_FLASHSIZE="16MB"
+
+# In this example, the default build (obtained with 'idf.py build')
+# targets a hypothetical development platform.
+CONFIG_EXAMPLE_PRODUCT_NAME="Blinky Development Board"
+
+# This selects 'func_dev.c' file to be compiled and linked, see CMakeLists.txt.
+CONFIG_EXAMPLE_FUNC_IMPL_DEV=y
+

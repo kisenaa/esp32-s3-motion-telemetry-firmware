@@ -1,0 +1,21 @@
+CompileFlags:
+  Remove:
+    - -f*
+    - -m*
+    - -Werror
+  Add:
+    - -ferror-limit=0
+    - -Wall
+    - -Wextra
+    - -Wconversion
+    - -Wsign-conversion
+    - -Wshadow
+Diagnostics:
+  ClangTidy:
+    Add:
+      - bugprone-*
+      - performance-*
+      - modernize-*
+    Remove:
+      - bugprone-easily-swappable-parameters
+      - modernize-use-trailing-return-type
