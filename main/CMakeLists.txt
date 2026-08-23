@@ -1,3 +1,16 @@
-idf_component_register(SRCS "main.c"
-                        INCLUDE_DIRS "."
-                        PRIV_REQUIRES mma8451q sd_card status_led)
+idf_component_register(
+    SRCS
+        "main.c"
+        "logger_task.c"
+        "app_state.c"
+        "sensor_task.c"
+    INCLUDE_DIRS
+        "include"
+    PRIV_REQUIRES
+        console_cli
+        mma8451q
+        sd_card
+        status_led
+        esp_driver_gpio
+        esp_timer
+)

@@ -1,0 +1,9 @@
+idf_component_register(
+    SRCS
+        "console_cli.c"
+    INCLUDE_DIRS
+        "include"
+    PRIV_REQUIRES
+        console
+        esp_timer
+)

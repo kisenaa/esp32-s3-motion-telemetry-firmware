@@ -1,20 +1,292 @@
-menu "Example Product Configuration"
+menu "Motion Telemetry Configuration"
 
-    config EXAMPLE_PRODUCT_NAME
-        string "Product name"
-        default "Not set"
+    menu "Status LED Configuration"
+      config APP_STATUS_RGB_LED_GPIO
+        int "Onboard RGB LED GPIO"
+        range 0 48
+        default 48
         help
-            Product name used in the example
+            GPIO connected to the onboard addressable RGB LED.
+            GPIO48 is common on ESP32-S3-DevKitC-1 boards, but some
+            board revisions use GPIO38. Check the board schematic.
 
-    choice EXAMPLE_FUNC_IMPL
-        prompt "Implementation of function 'func'"
+      config APP_STATUS_ACTIVITY_LED_GPIO
+        int "External activity LED GPIO"
+        range 0 48
+        default 8
         help
-            Select one of the implementations of 'func' to be used in the app.
-            This setting is used in component CMakeLists.txt.
+            GPIO connected to the external activity LED through a
+            220 to 330 ohm current-limiting resistor.
 
-        config EXAMPLE_FUNC_IMPL_DEV
-            bool "Development (func_dev.c)"
-        config EXAMPLE_FUNC_IMPL_PROD
-            bool "Production (func_prod.c)"
-    endchoice
+    endmenu
+
+    menu "Console CLI Configuration"
+      config APP_CONSOLE_UART_NUM
+        int "Console UART port"
+        range 0 2
+        default 0
+        help
+            UART controller used by the interactive command console.
+            UART0 connects to the ESP32-S3-DevKitC-1 onboard
+            USB-to-UART bridge.
+      
+      config APP_CONSOLE_UART_BAUD_RATE
+        int "Console UART baud rate"
+        range 9600 921600
+        default 115200
+        help
+            Baud rate used by the interactive UART console.
+            The serial monitor must use the same value.
+
+      config APP_CONSOLE_MAX_COMMAND_LINE_LENGTH
+        int "Maximum command-line length"
+        range 64 512
+        default 256
+        help
+            Maximum number of bytes accepted for one command line,
+            including command arguments.
+
+      config APP_CONSOLE_HISTORY_LENGTH
+        int "In-memory command history length"
+        range 0 64
+        default 16
+        help
+            Maximum number of previous commands retained in RAM.
+            Set to zero to disable command history.
+      
+      config APP_CONSOLE_TASK_STACK_SIZE
+        int "Console task stack size"
+        range 3072 8192
+        default 4096
+        help
+            Stack size in bytes for the ESP-IDF console REPL task.
+
+      config APP_CONSOLE_TASK_PRIORITY
+        int "Console task priority"
+        range 1 10
+        default 2
+        help
+            FreeRTOS priority of the console REPL task.
+    endmenu
+
+    menu "SD Card Configuration"
+      config APP_SD_SPI_HOST
+        int "SPI host"
+        range 1 2
+        default 2
+        help
+            SPI controller used by the SD card.
+      
+      config APP_SD_CS_GPIO
+        int "SD card CS GPIO"
+        range 0 48
+        default 10
+        help
+            Chip-select GPIO connected to the microSD module.
+
+      config APP_SD_MOSI_GPIO
+        int "SD card MOSI GPIO"
+        range 0 48
+        default 11
+        help
+            SPI controller output connected to the microSD MOSI input.
+
+      config APP_SD_SCLK_GPIO
+        int "SD card clock GPIO"
+        range 0 48
+        default 12
+        help
+            SPI clock GPIO connected to the microSD CLK input.
+
+      config APP_SD_MISO_GPIO
+        int "SD card MISO GPIO"
+        range 0 48
+        default 13
+        help
+            SPI controller input connected to the microSD MISO output.
+
+      config APP_SD_SPI_FREQUENCY_KHZ
+        int "SD card SPI frequency in kHz"
+        range 400 20000
+        default 10000
+        help
+            SPI clock used after card initialization. Start with 10000 kHz
+            for breadboard wiring. A reliable connection may later use up
+            to 20000 kHz.
+      
+      config APP_SD_MOUNT_POINT
+        string "SD card mount point"
+        default "/sdcard"
+        help
+            Virtual filesystem path at which the FAT filesystem is mounted.
+
+      config APP_SD_CSV_FILENAME
+        string "Telemetry CSV filename"
+        default "telemetry"
+        help
+            CSV file name created inside the SD card mount point without a '.csv' extension
+
+      config APP_SD_MAX_OPEN_FILES
+        int "Maximum simultaneously open files"
+        range 1 8
+        default 3
+        help
+            Maximum number of files FATFS may keep open for this mount.
+
+      config APP_SD_ALLOCATION_UNIT_SIZE
+        int "FAT allocation unit size"
+        range 4096 65536
+        default 16384
+        help
+            Allocation unit used only if formatting is enabled and the
+            filesystem must be created.
+
+      config APP_SD_FORMAT_IF_MOUNT_FAILED
+        bool "Format card if mounting fails"
+        default n
+        help
+            Allow ESP-IDF to format the card when mounting fails.
+            Keep this disabled normally because formatting destroys data.
+    endmenu
+
+    menu "MMA8451Q Configuration"
+      config APP_MMA8451Q_I2C_PORT
+        int "I2C controller"
+        range 0 1
+        default 0
+        help
+            ESP32-S3 I2C controller used to communicate with the sensor.
+
+      config APP_MMA8451Q_SDA_GPIO
+        int "I2C SDA GPIO"
+        range 0 48
+        default 2
+        help
+            GPIO connected to the MMA8451Q SDA pin.
+
+      config APP_MMA8451Q_SCL_GPIO
+        int "I2C SCL GPIO"
+        range 0 48
+        default 1
+        help
+            GPIO connected to the MMA8451Q SCL pin.
+
+      config APP_MMA8451Q_INT1_GPIO
+        int "MMA8451Q INT1 GPIO"
+        range 0 48
+        default 42
+        help
+            GPIO connected to the MMA8451Q INT1 output.
+
+      config APP_MMA8451Q_I2C_ADDRESS
+        hex "MMA8451Q I2C address"
+        range 0x1C 0x1D
+        default 0x1C
+        help
+            Seven-bit sensor address. Use 0x1C when SA0 is low and
+            0x1D when SA0 is high.
+
+      config APP_MMA8451Q_I2C_FREQUENCY_HZ
+        int "I2C clock frequency"
+        range 100000 1000000
+        default 400000
+        help
+            I2C clock frequency used for MMA8451Q transactions.
+
+      config APP_MMA8451Q_I2C_TIMEOUT_MS
+        int "I2C transaction timeout in milliseconds"
+        range 10 1000
+        default 100
+        help
+            Maximum wait time for one sensor I2C transaction.
+
+      config APP_MMA8451Q_DEFAULT_RANGE
+        int "Default measurement range index"
+        range 0 2
+        default 0
+        help
+            Initial measurement range:
+              0 = +/-2 g
+              1 = +/-4 g
+              2 = +/-8 g
+
+      config APP_MMA8451Q_DEFAULT_ODR
+        int "Default output data rate index"
+        range 0 7
+        default 3
+        help
+            Initial output data rate:
+              0 = 800 Hz
+              1 = 400 Hz
+              2 = 200 Hz
+              3 = 100 Hz
+              4 = 50 Hz
+              5 = 12.5 Hz
+              6 = 6.25 Hz
+              7 = 1.56 Hz
+    endmenu
+
+    menu "FreeRTOS Pipeline Configuration"
+      config APP_SAMPLE_QUEUE_LENGTH
+        int "Sample queue length"
+        range 8 512
+        default 64
+        help
+            Number of timestamped samples buffered between acquisition
+            and SD logging.
+
+      config APP_SENSOR_INTERRUPT_TIMEOUT_MS
+        int "DATA_READY interrupt recovery timeout in milliseconds"
+        range 100 10000
+        default 2000
+        help
+            Maximum time sensor_task waits for a DATA_READY notification.
+            On timeout, the task checks whether INT1 is stuck active-low and
+            services the pending sample. This avoids permanent acquisition
+            stalls after a missed GPIO edge or transient I2C failure.
+
+      config APP_SENSOR_TASK_STACK_SIZE
+        int "Sensor task stack size"
+        range 2048 8192
+        default 4096
+        help
+            Stack allocation for motion acquisition.
+
+      config APP_SENSOR_TASK_PRIORITY
+        int "Sensor task priority"
+        range 1 15
+        default 5
+        help
+            Sensor acquisition runs above the logger and CLI tasks.
+
+      config APP_LOGGER_TASK_STACK_SIZE
+        int "Logger task stack size"
+        range 3072 12288
+        default 6144
+        help
+            Stack allocation for FATFS and CSV logging operations.
+
+      config APP_LOGGER_TASK_PRIORITY
+        int "Logger task priority"
+        range 1 15
+        default 4
+        help
+            Logger runs below acquisition but above the interactive CLI.
+
+      config APP_LOGGER_FLUSH_RECORD_COUNT
+          int "Records between forced CSV flushes"
+          range 1 1000
+          default 25
+          help
+              Flush after this many successfully appended records.
+  
+      config APP_LOGGER_FLUSH_INTERVAL_MS
+          int "Maximum interval between CSV flush checks"
+          range 100 10000
+          default 1000
+          help
+              Flush pending records when this duration has elapsed.
+      endmenu
+
 endmenu
+

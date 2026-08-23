@@ -1,2 +1,10 @@
-idf_component_register(SRCS "sd_card.c"
-                    INCLUDE_DIRS "include")
+idf_component_register(
+    SRCS
+        "sd_card.c"
+    INCLUDE_DIRS
+        "include"
+    PRIV_REQUIRES
+        esp_driver_spi
+        fatfs
+        sdmmc
+)
