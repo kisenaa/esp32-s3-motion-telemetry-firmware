@@ -26,6 +26,8 @@ typedef struct {
   bool storage_ready;
   bool logging_enabled;
   bool latest_sample_valid;
+  bool sensor_ready;
+  uint32_t sample_rate_millihz;
 
   app_sample_t latest_sample;
 
@@ -60,6 +62,16 @@ void app_state_deinit(void);
  * @return ESP_OK on success or ESP_ERR_INVALID_STATE before initialization.
  */
 esp_err_t app_state_set_storage(bool storage_ready, bool logging_enabled);
+
+/**
+ * @brief Update sensor availability and configured output data rate.
+ *
+ * @param sensor_ready True when the sensor is available.
+ * @param rate_millihz Current sensor output rate in millihertz.
+ *
+ * @return ESP_OK on success or an initialization-state error.
+ */
+esp_err_t app_state_set_sensor(bool sensor_ready, uint32_t rate_millihz);
 
 /**
  * @brief Record a newly acquired sample.

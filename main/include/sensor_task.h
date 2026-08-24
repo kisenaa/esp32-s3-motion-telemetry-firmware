@@ -5,6 +5,7 @@
 #include "freertos/FreeRTOS.h" // IWYU pragma: keep
 #include "freertos/queue.h"
 #include "freertos/task.h"
+#include "mma8451q.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -24,6 +25,17 @@ extern "C" {
  */
 esp_err_t sensor_task_start(QueueHandle_t sample_queue,
                             TaskHandle_t *task_handle);
+
+/**
+ * @brief Change the MMA8451Q output data rate safely at runtime.
+ *
+ * Serializes the register update against interrupt-driven sample reads.
+ *
+ * @param odr New supported MMA8451Q output data rate.
+ *
+ * @return ESP_OK on success or a state, argument, or I2C error.
+ */
+esp_err_t sensor_task_set_odr(mma8451q_odr_t odr);
 
 /**
  * @brief Disable DATA_READY delivery and stop the sensor task.

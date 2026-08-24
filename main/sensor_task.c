@@ -1,11 +1,11 @@
 #include "sensor_task.h"
-
 #include "app_state.h"
 #include "driver/gpio.h"
 #include "esp_attr.h"
 #include "esp_intr_alloc.h"
 #include "esp_log.h"
 #include "esp_timer.h"
+#include "freertos/semphr.h"
 #include "mma8451q.h"
 #include "sdkconfig.h"
 
@@ -13,6 +13,8 @@ static const char *TAG = "sensor_task";
 
 static QueueHandle_t s_sample_queue = nullptr;
 static TaskHandle_t s_task_handle = nullptr;
+static StaticSemaphore_t s_sensor_mutex_storage;
+static SemaphoreHandle_t s_sensor_mutex = nullptr;
 static bool s_gpio_handler_registered = false;
 
 static constexpr gpio_num_t SENSOR_INT_GPIO =
@@ -29,6 +31,17 @@ static_assert(CONFIG_APP_MMA8451Q_INT1_GPIO < 64,
 
 static_assert(INTERRUPT_TIMEOUT > 0,
               "Interrupt timeout must produce at least one RTOS tick");
+
+static esp_err_t sensor_task_lock(void) {
+  if (s_sensor_mutex == nullptr) {
+    return ESP_ERR_INVALID_STATE;
+  }
+
+  return xSemaphoreTake(s_sensor_mutex, portMAX_DELAY) == pdTRUE ? ESP_OK
+                                                                 : ESP_FAIL;
+}
+
+static void sensor_task_unlock(void) { xSemaphoreGive(s_sensor_mutex); }
 
 static void IRAM_ATTR sensor_task_gpio_isr(void *argument) {
   (void)argument;
@@ -125,6 +138,32 @@ static void sensor_task_publish(const app_sample_t *sample) {
   ESP_LOGW(TAG, "Sample queue full; newest sample dropped");
 }
 
+static esp_err_t
+sensor_task_read_acceleration(mma8451q_sample_t *acceleration) {
+  esp_err_t err = sensor_task_lock();
+
+  if (err != ESP_OK) {
+    return err;
+  }
+
+  uint8_t sources = 0;
+  err = mma8451q_read_interrupt_source(&sources);
+
+  if (err == ESP_OK && (sources & MMA8451Q_INTERRUPT_DATA_READY) == 0U) {
+    sensor_task_unlock();
+    return ESP_ERR_NOT_FOUND;
+  }
+
+  const esp_err_t sample_err = mma8451q_read_sample(acceleration);
+
+  sensor_task_unlock();
+  if (sample_err != ESP_OK) {
+    return sample_err;
+  }
+
+  return ESP_OK;
+}
+
 static void sensor_task_acquire(uint32_t interrupt_count) {
   if (interrupt_count > 0U) {
     ESP_LOGD(TAG, "Acquiring sample after %u interrupt(s)", interrupt_count);
@@ -135,18 +174,13 @@ static void sensor_task_acquire(uint32_t interrupt_count) {
     ESP_LOGW(TAG, "INT1 remained active without a new GPIO edge");
   }
 
-  uint8_t sources = 0;
-  esp_err_t err = mma8451q_read_interrupt_source(&sources);
+  mma8451q_sample_t acceleration;
+  const esp_err_t err = sensor_task_read_acceleration(&acceleration);
 
-  if (err != ESP_OK) {
-    sensor_task_handle_read_error(err);
-  } else if ((sources & MMA8451Q_INTERRUPT_DATA_READY) == 0U) {
+  if (err == ESP_ERR_NOT_FOUND) {
     ESP_LOGW(TAG, "INT1 asserted without DATA_READY");
     return;
   }
-
-  mma8451q_sample_t acceleration;
-  err = mma8451q_read_sample(&acceleration);
 
   if (err != ESP_OK) {
     sensor_task_handle_read_error(err);
@@ -181,6 +215,11 @@ static void sensor_task_rollback_start(void) {
     s_task_handle = nullptr;
   }
 
+  if (s_sensor_mutex != nullptr) {
+    vSemaphoreDelete(s_sensor_mutex);
+    s_sensor_mutex = nullptr;
+  }
+
   s_sample_queue = nullptr;
 }
 
@@ -195,6 +234,12 @@ esp_err_t sensor_task_start(QueueHandle_t sample_queue,
   }
 
   s_sample_queue = sample_queue;
+  s_sensor_mutex = xSemaphoreCreateMutexStatic(&s_sensor_mutex_storage);
+
+  if (s_sensor_mutex == nullptr) {
+    s_sample_queue = nullptr;
+    return ESP_ERR_NO_MEM;
+  }
 
   const BaseType_t result = xTaskCreate(
       sensor_task_run, "sensor_task", CONFIG_APP_SENSOR_TASK_STACK_SIZE,
@@ -203,6 +248,8 @@ esp_err_t sensor_task_start(QueueHandle_t sample_queue,
   if (result != pdPASS) {
     s_sample_queue = nullptr;
     s_task_handle = nullptr;
+    vSemaphoreDelete(s_sensor_mutex);
+    s_sensor_mutex = nullptr;
     return ESP_ERR_NO_MEM;
   }
 
@@ -226,6 +273,23 @@ esp_err_t sensor_task_start(QueueHandle_t sample_queue,
   return ESP_OK;
 }
 
+esp_err_t sensor_task_set_odr(mma8451q_odr_t odr) {
+  if (s_task_handle == nullptr) {
+    return ESP_ERR_INVALID_STATE;
+  }
+
+  esp_err_t err = sensor_task_lock();
+
+  if (err != ESP_OK) {
+    return err;
+  }
+
+  err = mma8451q_set_odr(odr);
+  sensor_task_unlock();
+
+  return err;
+}
+
 void sensor_task_stop(void) {
   if (s_task_handle == nullptr) {
     return;
@@ -242,6 +306,11 @@ void sensor_task_stop(void) {
   sensor_task_release_gpio();
 
   vTaskDelete(s_task_handle);
+  if (s_sensor_mutex != nullptr) {
+    vSemaphoreDelete(s_sensor_mutex);
+    s_sensor_mutex = nullptr;
+  }
+
   s_task_handle = nullptr;
   s_sample_queue = nullptr;
 

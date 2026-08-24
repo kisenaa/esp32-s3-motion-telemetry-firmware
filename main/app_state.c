@@ -64,6 +64,24 @@ esp_err_t app_state_set_storage(bool storage_ready, bool logging_enabled) {
   return ESP_OK;
 }
 
+esp_err_t app_state_set_sensor(bool sensor_ready, uint32_t rate_millihz) {
+  if (sensor_ready && rate_millihz == 0U) {
+    return ESP_ERR_INVALID_ARG;
+  }
+
+  esp_err_t err = app_state_lock();
+
+  if (err != ESP_OK) {
+    return err;
+  }
+
+  s_state.sensor_ready = sensor_ready;
+  s_state.sample_rate_millihz = sensor_ready ? rate_millihz : 0U;
+
+  app_state_unlock();
+  return ESP_OK;
+}
+
 esp_err_t app_state_record_sample(const app_sample_t *sample) {
   if (sample == nullptr) {
     return ESP_ERR_INVALID_ARG;

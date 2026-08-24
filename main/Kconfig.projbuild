@@ -147,6 +147,13 @@ menu "Motion Telemetry Configuration"
         help
             Allow ESP-IDF to format the card when mounting fails.
             Keep this disabled normally because formatting destroys data.
+
+      config APP_DEFAULT_LOGGING_ENABLED
+        bool "Start CSV logging automatically"
+        default n
+        help
+            Start an indexed CSV session during boot. When disabled, the SD
+            card is mounted but logging starts only after the 'log on' command.
     endmenu
 
     menu "MMA8451Q Configuration"
@@ -188,10 +195,11 @@ menu "Motion Telemetry Configuration"
 
       config APP_MMA8451Q_I2C_FREQUENCY_HZ
         int "I2C clock frequency"
-        range 100000 1000000
+        range 100000 400000
         default 400000
         help
-            I2C clock frequency used for MMA8451Q transactions.
+            I2C clock frequency used for MMA8451Q transactions. The sensor
+            supports standard mode and fast mode up to 400 kHz.
 
       config APP_MMA8451Q_I2C_TIMEOUT_MS
         int "I2C transaction timeout in milliseconds"

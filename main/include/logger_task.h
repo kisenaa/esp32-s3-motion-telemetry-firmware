@@ -2,7 +2,7 @@
 #define LOGGER_TASK_H
 
 #include "esp_err.h"
-#include "freertos/FreeRTOS.h"
+#include "freertos/FreeRTOS.h" // IWYU pragma: keep
 #include "freertos/queue.h"
 #include "freertos/task.h"
 
@@ -20,6 +20,16 @@ extern "C" {
  */
 esp_err_t logger_task_start(QueueHandle_t sample_queue,
                             TaskHandle_t *task_handle);
+
+/**
+ * @brief Request a runtime logging-state change.
+ *
+ * The logger task performs the SD operation in its own context.
+ *
+ * @param enable True to start a new CSV session; false to stop logging.
+ *
+ * @return ESP_OK on success or a state or SD-card error. */
+esp_err_t logger_task_set_logging(bool enable);
 
 /**
  * @brief Stop the logger task if it is running.

@@ -1,15 +1,8 @@
-/*
- * SPDX-FileCopyrightText: 2026 Espressif Systems (Shanghai) CO LTD
- *
- * SPDX-License-Identifier: Unlicense OR CC0-1.0
- */
 #include "app_state.h"
 #include "console_cli.h"
 #include "esp_err.h"
 #include "esp_log.h"
-#include "esp_timer.h"
 #include "freertos/FreeRTOS.h" // IWYU pragma: keep
-#include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
 #include "freertos/task.h"
 #include "logger_task.h"
@@ -18,6 +11,7 @@
 #include "sdkconfig.h"
 #include "sensor_task.h"
 #include "status_led.h"
+#include <string.h>
 
 static const char *TAG = "main";
 
@@ -25,240 +19,124 @@ static QueueHandle_t s_sample_queue = nullptr;
 static TaskHandle_t s_sensor_task = nullptr;
 static TaskHandle_t s_logger_task = nullptr;
 
-static constexpr TickType_t STATE_TEST_DURATION = pdMS_TO_TICKS(2000);
-
-static esp_err_t toogle_status_led(status_led_state_t state,
-                                   const char *state_name) {
-  ESP_LOGI(TAG, "Testing status LED to %s", state_name);
-
-  esp_err_t err = status_led_set_state(state);
-
-  if (err != ESP_OK) {
-    ESP_LOGE(TAG, "Failed to set status LED state: %s", esp_err_to_name(err));
-    return err;
-  }
-
-  err = status_led_activity_pulse();
-
-  if (err != ESP_OK) {
-    ESP_LOGE(TAG, "Failed to pulse activity LED: %s", esp_err_to_name(err));
-    return err;
-  }
-
-  vTaskDelay(STATE_TEST_DURATION);
-  return ESP_OK;
-}
-
-void let_state_testing(void) {
-  esp_err_t err = status_led_init();
-
-  if (err != ESP_OK) {
-    ESP_LOGE(TAG, "Status LED initialization failed: %s", esp_err_to_name(err));
-    return;
-  }
-
-  vTaskDelay(STATE_TEST_DURATION);
-
-  while (true) {
-    err = toogle_status_led(STATUS_LED_INITIALIZING, "initializing/yellow");
-
-    if (err != ESP_OK) {
-      return;
-    }
-
-    err = toogle_status_led(STATUS_LED_READY, "ready/green");
-
-    if (err != ESP_OK) {
-      return;
-    }
-
-    err = toogle_status_led(STATUS_LED_LOGGING, "logging/blue");
-
-    if (err != ESP_OK) {
-      return;
-    }
-
-    err = toogle_status_led(STATUS_LED_ERROR, "error/red");
-
-    if (err != ESP_OK) {
-      return;
-    }
-
-    err = toogle_status_led(STATUS_LED_OFF, "off");
-
-    if (err != ESP_OK) {
-      return;
-    }
-  }
-}
-
-static esp_err_t phase3_test_sd_logger(void) {
-  esp_err_t err = sd_card_init();
-
-  if (err != ESP_OK) {
-    ESP_LOGE(TAG, "SD card initialization failed: %s", esp_err_to_name(err));
-    return err;
-  }
-
-  err = sd_card_start();
-
-  if (err != ESP_OK) {
-    ESP_LOGE(TAG, "CSV logging start failed: %s", esp_err_to_name(err));
-    sd_card_deinit();
-    return err;
-  }
-
-  const sd_card_record_t test_records[] = {
-      {
-          .timestamp_us = esp_timer_get_time(),
-          .x_raw = 12,
-          .y_raw = -23,
-          .z_raw = 4090,
-          .x_g = 0.003f,
-          .y_g = -0.006f,
-          .z_g = 0.999f,
-      },
-      {
-          .timestamp_us = esp_timer_get_time() + 10000,
-          .x_raw = 18,
-          .y_raw = -20,
-          .z_raw = 4085,
-          .x_g = 0.004f,
-          .y_g = -0.005f,
-          .z_g = 0.997f,
-      },
-      {
-          .timestamp_us = esp_timer_get_time() + 20000,
-          .x_raw = 21,
-          .y_raw = -18,
-          .z_raw = 4078,
-          .x_g = 0.005f,
-          .y_g = -0.004f,
-          .z_g = 0.996f,
-      },
+static uint32_t app_default_rate_millihz(void) {
+  static constexpr uint32_t RATES[] = {
+      800000U, 400000U, 200000U, 100000U, 50000U, 12500U, 6250U, 1560U,
   };
 
-  for (size_t index = 0; index < sizeof(test_records) / sizeof(test_records[0]);
-       ++index) {
-    err = sd_card_append(&test_records[index]);
-
-    if (err != ESP_OK) {
-      ESP_LOGE(TAG, "Failed to append test record %u: %s", (unsigned)index,
-               esp_err_to_name(err));
-      (void)sd_card_stop();
-      sd_card_deinit();
-      return err;
-    }
-  }
-
-  err = sd_card_stop();
-
-  if (err != ESP_OK) {
-    ESP_LOGE(TAG, "CSV logging stop failed: %s", esp_err_to_name(err));
-    sd_card_deinit();
-    return err;
-  }
-
-  sd_card_deinit();
-
-  ESP_LOGI(TAG, "Phase 3 CSV test completed");
-  return ESP_OK;
+  return RATES[CONFIG_APP_MMA8451Q_DEFAULT_ODR];
 }
 
-static const char *orientation_name(mma8451q_orientation_t orientation) {
-  switch (orientation) {
-  case MMA8451Q_ORIENTATION_PORTRAIT_UP:
-    return "portrait up";
+static esp_err_t app_odr_from_millihz(uint32_t millihz, mma8451q_odr_t *odr) {
+  if (odr == nullptr) {
+    return ESP_ERR_INVALID_ARG;
+  }
 
-  case MMA8451Q_ORIENTATION_PORTRAIT_DOWN:
-    return "portrait down";
-
-  case MMA8451Q_ORIENTATION_LANDSCAPE_RIGHT:
-    return "landscape right";
-
-  case MMA8451Q_ORIENTATION_LANDSCAPE_LEFT:
-    return "landscape left";
-
+  switch (millihz) {
+  case 800000U:
+    *odr = MMA8451Q_ODR_800_HZ;
+    return ESP_OK;
+  case 400000U:
+    *odr = MMA8451Q_ODR_400_HZ;
+    return ESP_OK;
+  case 200000U:
+    *odr = MMA8451Q_ODR_200_HZ;
+    return ESP_OK;
+  case 100000U:
+    *odr = MMA8451Q_ODR_100_HZ;
+    return ESP_OK;
+  case 50000U:
+    *odr = MMA8451Q_ODR_50_HZ;
+    return ESP_OK;
+  case 12500U:
+    *odr = MMA8451Q_ODR_12_5_HZ;
+    return ESP_OK;
+  case 6250U:
+    *odr = MMA8451Q_ODR_6_25_HZ;
+    return ESP_OK;
+  case 1560U:
+    *odr = MMA8451Q_ODR_1_56_HZ;
+    return ESP_OK;
   default:
-    return "unknown";
+    return ESP_ERR_INVALID_ARG;
   }
 }
 
-static esp_err_t phase4_test_mma8451q(void) {
-  esp_err_t err = mma8451q_init();
+static void app_cli_copy_sample(const app_state_snapshot_t *source,
+                                console_cli_runtime_state_t *destination) {
+  destination->latest_sample_valid = source->latest_sample_valid;
+  destination->timestamp_us = source->latest_sample.timestamp_us;
 
+  destination->x_raw = source->latest_sample.acceleration.x_raw;
+  destination->y_raw = source->latest_sample.acceleration.y_raw;
+  destination->z_raw = source->latest_sample.acceleration.z_raw;
+
+  destination->x_g = source->latest_sample.acceleration.x_g;
+  destination->y_g = source->latest_sample.acceleration.y_g;
+  destination->z_g = source->latest_sample.acceleration.z_g;
+}
+
+static void app_cli_copy_counters(const app_state_snapshot_t *source,
+                                  console_cli_runtime_state_t *destination) {
+  destination->samples_acquired = source->samples_acquired;
+  destination->sensor_interrupts = source->sensor_interrupts;
+  destination->samples_logged = source->samples_logged;
+  destination->queue_drops = source->queue_drops;
+  destination->i2c_errors = source->i2c_errors;
+  destination->sd_errors = source->sd_errors;
+}
+
+static esp_err_t app_cli_get_state(void *context,
+                                   console_cli_runtime_state_t *destination) {
+  (void)context;
+
+  if (destination == nullptr) {
+    return ESP_ERR_INVALID_ARG;
+  }
+
+  app_state_snapshot_t source;
+  const esp_err_t err = app_state_get_snapshot(&source);
   if (err != ESP_OK) {
-    ESP_LOGE(TAG, "MMA8451Q initialization failed: %s", esp_err_to_name(err));
     return err;
   }
 
-  err = mma8451q_enable_orientation(true);
+  memset(destination, 0, sizeof(*destination));
 
-  if (err != ESP_OK) {
-    ESP_LOGE(TAG, "Failed to enable orientation detection: %s",
-             esp_err_to_name(err));
-    (void)mma8451q_deinit();
-    return err;
-  }
+  destination->sensor_ready = source.sensor_ready;
+  destination->storage_ready = source.storage_ready;
+  destination->logging_enabled = source.logging_enabled;
+  destination->sample_rate_millihz = source.sample_rate_millihz;
 
-  err = mma8451q_enable_data_ready_interrupt(true);
+  destination->queued_samples =
+      (uint32_t)uxQueueMessagesWaiting(s_sample_queue);
+  destination->queue_capacity = CONFIG_APP_SAMPLE_QUEUE_LENGTH;
 
-  if (err != ESP_OK) {
-    ESP_LOGE(TAG, "Failed to enable data-ready interrupt: %s",
-             esp_err_to_name(err));
-    (void)mma8451q_deinit();
-    return err;
-  }
-
-  err = mma8451q_set_range(MMA8451Q_RANGE_8G);
-  if (err != ESP_OK) {
-    ESP_LOGE(TAG, "Failed to set range to 8G: %s", esp_err_to_name(err));
-    (void)mma8451q_deinit();
-    return err;
-  }
-
-  for (size_t index = 0; index < 10; ++index) {
-    mma8451q_sample_t sample;
-
-    err = mma8451q_read_sample(&sample);
-
-    if (err != ESP_OK) {
-      ESP_LOGE(TAG, "Sample read failed: %s", esp_err_to_name(err));
-      (void)mma8451q_deinit();
-      return err;
-    }
-
-    ESP_LOGI(TAG, "sample %u: raw=(%d, %d, %d), g=(%.3f, %.3f, %.3f)",
-             (unsigned)index, sample.x_raw, sample.y_raw, sample.z_raw,
-             (double)sample.x_g, (double)sample.y_g, (double)sample.z_g);
-
-    vTaskDelay(pdMS_TO_TICKS(100));
-  }
-  mma8451q_orientation_status_t orientation;
-
-  err = mma8451q_read_orientation(&orientation);
-
-  if (err != ESP_OK) {
-    ESP_LOGE(TAG, "Orientation read failed: %s", esp_err_to_name(err));
-    (void)mma8451q_deinit();
-    return err;
-  }
-
-  ESP_LOGI(TAG, "Orientation: %s, face: %s, changed: %s, lockout: %s",
-           orientation_name(orientation.orientation),
-           orientation.back_facing ? "back" : "front",
-           orientation.changed ? "yes" : "no",
-           orientation.lockout ? "yes" : "no");
-
-  err = mma8451q_deinit();
-
-  if (err != ESP_OK) {
-    ESP_LOGE(TAG, "MMA8451Q deinitialization failed: %s", esp_err_to_name(err));
-    return err;
-  }
-
-  ESP_LOGI(TAG, "Phase 4 MMA8451Q test completed");
+  app_cli_copy_sample(&source, destination);
+  app_cli_copy_counters(&source, destination);
   return ESP_OK;
+}
+
+static esp_err_t app_cli_set_logging(void *context, bool enable) {
+  (void)context;
+  return logger_task_set_logging(enable);
+}
+
+static esp_err_t app_cli_set_rate(void *context, uint32_t rate_millihz) {
+  (void)context;
+
+  mma8451q_odr_t odr;
+  esp_err_t err = app_odr_from_millihz(rate_millihz, &odr);
+
+  if (err != ESP_OK) {
+    return err;
+  }
+  err = sensor_task_set_odr(odr);
+
+  if (err != ESP_OK) {
+    return err;
+  }
+
+  return app_state_set_sensor(true, rate_millihz);
 }
 
 static bool app_initialize_storage(void) {
@@ -271,6 +149,7 @@ static bool app_initialize_storage(void) {
     return false;
   }
 
+#ifdef CONFIG_APP_DEFAULT_LOGGING_ENABLED
   err = sd_card_start();
 
   if (err != ESP_OK) {
@@ -283,6 +162,10 @@ static bool app_initialize_storage(void) {
 
   (void)app_state_set_storage(true, true);
   ESP_LOGI(TAG, "SD logging ready");
+#else
+  (void)app_state_set_storage(true, false);
+  ESP_LOGI(TAG, "SD card ready; logging disabled");
+#endif
   return true;
 }
 
@@ -333,49 +216,6 @@ static esp_err_t app_start_pipeline(void) {
 }
 
 void app_main(void) {
-  // ESP_LOGI(TAG, "Starting status LED test application");
-  // let_state_testing();
-
-  // esp_err_t err = status_led_init();
-
-  // if (err != ESP_OK) {
-  //   ESP_LOGE(TAG, "Status LED initialization failed: %s",
-  //   esp_err_to_name(err)); return;
-  // }
-
-  // err = phase3_test_sd_logger();
-
-  // if (err != ESP_OK) {
-  //   ESP_LOGE(TAG, "Phase 3 SD logger test failed: %s", esp_err_to_name(err));
-  //   (void)status_led_set_state(STATUS_LED_ERROR);
-  //   return;
-  // }
-
-  // err = phase4_test_mma8451q();
-
-  // if (err != ESP_OK) {
-  //   ESP_LOGE(TAG, "Phase 4 MMA8451Q test failed: %s", esp_err_to_name(err));
-  //   (void)status_led_set_state(STATUS_LED_ERROR);
-  //   return;
-  // }
-
-  // err = console_cli_init();
-
-  // if (err != ESP_OK) {
-  //   ESP_LOGE(TAG, "Console CLI initialization failed: %s",
-  //            esp_err_to_name(err));
-  //   (void)status_led_set_state(STATUS_LED_ERROR);
-  //   return;
-  // }
-
-  // err = status_led_set_state(STATUS_LED_READY);
-
-  // if (err != ESP_OK) {
-  //   ESP_LOGE(TAG, "Failed to set ready LED state: %s", esp_err_to_name(err));
-  //   return;
-  // }
-
-  // ESP_LOGI(TAG, "Console CLI ready; type 'help' for commands");
   esp_err_t err = status_led_init();
 
   if (err != ESP_OK) {
@@ -403,6 +243,16 @@ void app_main(void) {
     return;
   }
 
+  err = app_state_set_sensor(true, app_default_rate_millihz());
+
+  if (err != ESP_OK) {
+    ESP_LOGE(TAG, "Failed to record sensor state: %s", esp_err_to_name(err));
+    (void)mma8451q_deinit();
+    app_state_deinit();
+    (void)status_led_set_state(STATUS_LED_ERROR);
+    return;
+  }
+
   const bool storage_ready = app_initialize_storage();
 
   err = app_start_pipeline();
@@ -414,7 +264,14 @@ void app_main(void) {
     return;
   }
 
-  err = console_cli_init();
+  const console_cli_config_t cli_config = {
+      .context = nullptr,
+      .get_state = app_cli_get_state,
+      .set_logging = app_cli_set_logging,
+      .set_rate = app_cli_set_rate,
+  };
+
+  err = console_cli_init(&cli_config);
 
   if (err != ESP_OK) {
     ESP_LOGE(TAG, "Console CLI unavailable: %s", esp_err_to_name(err));
@@ -422,8 +279,15 @@ void app_main(void) {
     return;
   }
 
-  status_led_state_t state =
-      storage_ready ? STATUS_LED_LOGGING : STATUS_LED_READY;
+  status_led_state_t state = STATUS_LED_ERROR;
+
+  if (storage_ready) {
+#ifdef CONFIG_APP_DEFAULT_LOGGING_ENABLED
+    state = STATUS_LED_LOGGING;
+#else
+    state = STATUS_LED_READY;
+#endif
+  }
 
   err = status_led_set_state(state);
 
@@ -431,5 +295,5 @@ void app_main(void) {
     ESP_LOGE(TAG, "Failed to set runtime LED state: %s", esp_err_to_name(err));
   }
 
-  ESP_LOGI(TAG, "Phase 5 acquisition pipeline running");
+  ESP_LOGI(TAG, "Phase 7 acquisition pipeline running");
 }
