@@ -7,7 +7,7 @@ provides runtime control through a UART REPL.
 
 | | |
 | :---: | :---: |
-| <video src="https://github.com/user-attachments/assets/07451c9f-f951-4f3a-a432-02f33cbec28d" width="50%"></video> | <img src="https://github.com/user-attachments/assets/93fd87bc-9ac0-4bd7-ad8b-949be9526ed9" width="80%" alt="image" /> |
+| <video src="https://github.com/user-attachments/assets/07451c9f-f951-4f3a-a432-02f33cbec28d" width="50%"></video> | <img src="https://github.com/user-attachments/assets/93fd87bc-9ac0-4bd7-ad8b-949be9526ed9" width="100%" alt="image" /> |
 
 ## Table of Contents
 
