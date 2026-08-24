@@ -17,7 +17,7 @@
   - CONFIG_APP_MMA8451Q_DEFAULT_ODR
 */
 
-static const char *TAG = "mma8451q";
+static const char *const TAG = "mma8451q";
 
 static constexpr uint8_t REG_OUT_X_MSB = 0x01;
 static constexpr uint8_t REG_INT_SOURCE = 0x0C;
@@ -160,28 +160,34 @@ static esp_err_t mma8451q_restore_active(bool was_active) {
   return mma8451q_write_register(REG_CTRL1, ctrl1);
 }
 
-static void mma8451q_cleanup_initialization(void) {
+static esp_err_t mma8451q_release_resources(void) {
+  esp_err_t result = ESP_OK;
+
   if (s_device != nullptr) {
     const esp_err_t err = i2c_master_bus_rm_device(s_device);
 
     if (err != ESP_OK) {
       ESP_LOGE(TAG, "Failed to remove I2C device during cleanup: %s",
                esp_err_to_name(err));
+      result = err;
+    } else {
+      s_device = nullptr;
     }
-
-    s_device = nullptr;
   }
 
-  if (s_bus != nullptr) {
+  if (s_device == nullptr && s_bus != nullptr) {
     const esp_err_t err = i2c_del_master_bus(s_bus);
 
     if (err != ESP_OK) {
       ESP_LOGE(TAG, "Failed to delete I2C bus during cleanup: %s",
                esp_err_to_name(err));
+      result = err;
+    } else {
+      s_bus = nullptr;
     }
-
-    s_bus = nullptr;
   }
+
+  return result;
 }
 
 static esp_err_t mma8451q_configure_range_in_standby(mma8451q_range_t range) {
@@ -227,6 +233,20 @@ static esp_err_t mma8451q_configure_odr_in_standby(mma8451q_odr_t odr) {
   return mma8451q_write_register(REG_CTRL1, ctrl1);
 }
 
+static esp_err_t mma8451q_configure_interrupt_output_in_standby(void) {
+  uint8_t ctrl3;
+  const esp_err_t err = mma8451q_read_register(REG_CTRL3, &ctrl3);
+
+  if (err != ESP_OK) {
+    return err;
+  }
+
+  ctrl3 &= (uint8_t)~CTRL3_PUSH_PULL_OPEN_DRAIN_MASK;
+  ctrl3 &= (uint8_t)~CTRL3_INTERRUPT_POLARITY_MASK;
+
+  return mma8451q_write_register(REG_CTRL3, ctrl3);
+}
+
 esp_err_t mma8451q_init(void) {
   if (s_initialized) {
     return ESP_ERR_INVALID_STATE;
@@ -253,7 +273,11 @@ esp_err_t mma8451q_init(void) {
   if (err != ESP_OK) {
     ESP_LOGE(TAG, "MMA8451Q not found at address 0x%02X: %s",
              CONFIG_APP_MMA8451Q_I2C_ADDRESS, esp_err_to_name(err));
-    mma8451q_cleanup_initialization();
+    const esp_err_t cleanup_err = mma8451q_release_resources();
+    if (cleanup_err != ESP_OK) {
+      s_initialized = true;
+      return cleanup_err;
+    }
     return ESP_ERR_NOT_FOUND;
   }
 
@@ -268,7 +292,11 @@ esp_err_t mma8451q_init(void) {
   if (err != ESP_OK) {
     ESP_LOGE(TAG, "Failed to add MMA8451Q I2C device: %s",
              esp_err_to_name(err));
-    mma8451q_cleanup_initialization();
+    const esp_err_t cleanup_err = mma8451q_release_resources();
+    if (cleanup_err != ESP_OK) {
+      s_initialized = true;
+      return cleanup_err;
+    }
     return err;
   }
 
@@ -277,13 +305,21 @@ esp_err_t mma8451q_init(void) {
 
   if (err != ESP_OK) {
     ESP_LOGE(TAG, "Failed to read WHO_AM_I: %s", esp_err_to_name(err));
-    mma8451q_cleanup_initialization();
+    const esp_err_t cleanup_err = mma8451q_release_resources();
+    if (cleanup_err != ESP_OK) {
+      s_initialized = true;
+      return cleanup_err;
+    }
     return err;
   }
 
   if (device_id != WHO_AM_I_VALUE) {
     ESP_LOGE(TAG, "Unexpected WHO_AM_I value: 0x%02X", device_id);
-    mma8451q_cleanup_initialization();
+    const esp_err_t cleanup_err = mma8451q_release_resources();
+    if (cleanup_err != ESP_OK) {
+      s_initialized = true;
+      return cleanup_err;
+    }
     return ESP_ERR_NOT_FOUND;
   }
 
@@ -294,7 +330,11 @@ esp_err_t mma8451q_init(void) {
   err = mma8451q_read_register(REG_CTRL1, &ctrl1);
 
   if (err != ESP_OK) {
-    mma8451q_cleanup_initialization();
+    const esp_err_t cleanup_err = mma8451q_release_resources();
+    if (cleanup_err != ESP_OK) {
+      s_initialized = true;
+      return cleanup_err;
+    }
     return err;
   }
 
@@ -302,7 +342,11 @@ esp_err_t mma8451q_init(void) {
   err = mma8451q_write_register(REG_CTRL1, ctrl1);
 
   if (err != ESP_OK) {
-    mma8451q_cleanup_initialization();
+    const esp_err_t cleanup_err = mma8451q_release_resources();
+    if (cleanup_err != ESP_OK) {
+      s_initialized = true;
+      return cleanup_err;
+    }
     return err;
   }
 
@@ -312,7 +356,11 @@ esp_err_t mma8451q_init(void) {
   if (err != ESP_OK) {
     ESP_LOGE(TAG, "Failed to configure measurement range: %s",
              esp_err_to_name(err));
-    mma8451q_cleanup_initialization();
+    const esp_err_t cleanup_err = mma8451q_release_resources();
+    if (cleanup_err != ESP_OK) {
+      s_initialized = true;
+      return cleanup_err;
+    }
     return err;
   }
 
@@ -322,7 +370,11 @@ esp_err_t mma8451q_init(void) {
   if (err != ESP_OK) {
     ESP_LOGE(TAG, "Failed to configure output data rate: %s",
              esp_err_to_name(err));
-    mma8451q_cleanup_initialization();
+    const esp_err_t cleanup_err = mma8451q_release_resources();
+    if (cleanup_err != ESP_OK) {
+      s_initialized = true;
+      return cleanup_err;
+    }
     return err;
   }
 
@@ -334,7 +386,11 @@ esp_err_t mma8451q_init(void) {
 
   if (err != ESP_OK) {
     ESP_LOGE(TAG, "Failed to activate MMA8451Q: %s", esp_err_to_name(err));
-    mma8451q_cleanup_initialization();
+    const esp_err_t cleanup_err = mma8451q_release_resources();
+    if (cleanup_err != ESP_OK) {
+      s_initialized = true;
+      return cleanup_err;
+    }
     return err;
   }
 
@@ -346,6 +402,21 @@ esp_err_t mma8451q_init(void) {
   return ESP_OK;
 }
 
+esp_err_t mma8451q_check_connection(void) {
+  if (!s_initialized) {
+    return ESP_ERR_INVALID_STATE;
+  }
+
+  uint8_t device_id;
+  const esp_err_t err = mma8451q_read_register(REG_WHO_AM_I, &device_id);
+
+  if (err != ESP_OK) {
+    return err;
+  }
+
+  return device_id == WHO_AM_I_VALUE ? ESP_OK : ESP_ERR_NOT_FOUND;
+}
+
 esp_err_t mma8451q_deinit(void) {
   if (!s_initialized) {
     return ESP_ERR_INVALID_STATE;
@@ -353,38 +424,28 @@ esp_err_t mma8451q_deinit(void) {
 
   esp_err_t result = ESP_OK;
 
-  uint8_t ctrl1;
-  esp_err_t err = mma8451q_read_register(REG_CTRL1, &ctrl1);
+  if (s_device != nullptr) {
+    uint8_t ctrl1;
+    const esp_err_t standby_err = mma8451q_read_register(REG_CTRL1, &ctrl1);
 
-  if (err == ESP_OK) {
-    err =
-        mma8451q_write_register(REG_CTRL1, ctrl1 & (uint8_t)~CTRL1_ACTIVE_MASK);
-  }
-
-  if (err != ESP_OK) {
-    ESP_LOGE(TAG, "Failed to place sensor in standby: %s",
-             esp_err_to_name(err));
-    result = err;
-  }
-
-  err = i2c_master_bus_rm_device(s_device);
-
-  if (err != ESP_OK) {
-    ESP_LOGE(TAG, "Failed to remove MMA8451Q device: %s", esp_err_to_name(err));
-    result = err;
-  } else {
-    s_device = nullptr;
-  }
-
-  if (s_device == nullptr) {
-    err = i2c_del_master_bus(s_bus);
-
-    if (err != ESP_OK) {
-      ESP_LOGE(TAG, "Failed to delete I2C bus: %s", esp_err_to_name(err));
-      result = err;
+    if (standby_err == ESP_OK) {
+      const esp_err_t write_err = mma8451q_write_register(
+          REG_CTRL1, ctrl1 & (uint8_t)~CTRL1_ACTIVE_MASK);
+      if (write_err != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to place sensor in standby: %s",
+                 esp_err_to_name(write_err));
+        result = write_err;
+      }
     } else {
-      s_bus = nullptr;
+      ESP_LOGE(TAG, "Failed to place sensor in standby: %s",
+               esp_err_to_name(standby_err));
+      result = standby_err;
     }
+  }
+
+  const esp_err_t cleanup_err = mma8451q_release_resources();
+  if (result == ESP_OK && cleanup_err != ESP_OK) {
+    result = cleanup_err;
   }
 
   if (s_device == nullptr && s_bus == nullptr) {
@@ -393,6 +454,35 @@ esp_err_t mma8451q_deinit(void) {
   }
 
   return result;
+}
+
+esp_err_t mma8451q_read_sample(mma8451q_sample_t *sample) {
+  if (sample == nullptr) {
+    return ESP_ERR_INVALID_ARG;
+  }
+
+  if (!s_initialized) {
+    return ESP_ERR_INVALID_STATE;
+  }
+
+  uint8_t data[ACCELERATION_BYTE_COUNT];
+  const esp_err_t err =
+      mma8451q_read_registers(REG_OUT_X_MSB, data, sizeof(data));
+
+  if (err != ESP_OK) {
+    ESP_LOGE(TAG, "Failed to read acceleration data: %s", esp_err_to_name(err));
+    return err;
+  }
+
+  sample->x_raw = mma8451q_decode_14bit(data[0], data[1]);
+  sample->y_raw = mma8451q_decode_14bit(data[2], data[3]);
+  sample->z_raw = mma8451q_decode_14bit(data[4], data[5]);
+
+  const float counts_per_g = mma8451q_counts_per_g(s_range);
+  sample->x_g = (float)sample->x_raw / counts_per_g;
+  sample->y_g = (float)sample->y_raw / counts_per_g;
+  sample->z_g = (float)sample->z_raw / counts_per_g;
+  return ESP_OK;
 }
 
 esp_err_t mma8451q_set_range(mma8451q_range_t range) {
@@ -433,37 +523,6 @@ esp_err_t mma8451q_set_range(mma8451q_range_t range) {
   return ESP_OK;
 }
 
-esp_err_t mma8451q_read_sample(mma8451q_sample_t *sample) {
-  if (sample == nullptr) {
-    return ESP_ERR_INVALID_ARG;
-  }
-
-  if (!s_initialized) {
-    return ESP_ERR_INVALID_STATE;
-  }
-
-  uint8_t data[ACCELERATION_BYTE_COUNT];
-
-  esp_err_t err = mma8451q_read_registers(REG_OUT_X_MSB, data, sizeof(data));
-
-  if (err != ESP_OK) {
-    ESP_LOGE(TAG, "Failed to read acceleration data: %s", esp_err_to_name(err));
-    return err;
-  }
-
-  sample->x_raw = mma8451q_decode_14bit(data[0], data[1]);
-  sample->y_raw = mma8451q_decode_14bit(data[2], data[3]);
-  sample->z_raw = mma8451q_decode_14bit(data[4], data[5]);
-
-  const float counts_per_g = mma8451q_counts_per_g(s_range);
-
-  sample->x_g = (float)sample->x_raw / counts_per_g;
-  sample->y_g = (float)sample->y_raw / counts_per_g;
-  sample->z_g = (float)sample->z_raw / counts_per_g;
-
-  return ESP_OK;
-}
-
 esp_err_t mma8451q_set_odr(mma8451q_odr_t odr) {
   if (!s_initialized) {
     return ESP_ERR_INVALID_STATE;
@@ -497,20 +556,6 @@ esp_err_t mma8451q_set_odr(mma8451q_odr_t odr) {
   ESP_LOGI(TAG, "Output data rate changed to index %d", (int)odr);
 
   return ESP_OK;
-}
-
-static esp_err_t mma8451q_configure_interrupt_output_in_standby(void) {
-  uint8_t ctrl3;
-  esp_err_t err = mma8451q_read_register(REG_CTRL3, &ctrl3);
-
-  if (err != ESP_OK) {
-    return err;
-  }
-
-  ctrl3 &= (uint8_t)~CTRL3_PUSH_PULL_OPEN_DRAIN_MASK;
-  ctrl3 &= (uint8_t)~CTRL3_INTERRUPT_POLARITY_MASK;
-
-  return mma8451q_write_register(REG_CTRL3, ctrl3);
 }
 
 esp_err_t mma8451q_enable_data_ready_interrupt(bool enable) {

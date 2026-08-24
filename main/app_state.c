@@ -18,7 +18,7 @@ static esp_err_t app_state_lock(void) {
 static void app_state_unlock(void) { xSemaphoreGive(s_mutex); }
 
 static esp_err_t app_state_increment(uint64_t *counter) {
-  esp_err_t err = app_state_lock();
+  const esp_err_t err = app_state_lock();
 
   if (err != ESP_OK) {
     return err;
@@ -128,6 +128,10 @@ esp_err_t app_state_record_queue_drop(void) {
 
 esp_err_t app_state_record_i2c_error(void) {
   return app_state_increment(&s_state.i2c_errors);
+}
+
+esp_err_t app_state_record_sensor_reinitialization(void) {
+  return app_state_increment(&s_state.sensor_reinitializations);
 }
 
 esp_err_t app_state_record_sd_error(void) {

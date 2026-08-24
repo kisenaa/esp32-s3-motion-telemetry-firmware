@@ -17,14 +17,16 @@
   - CONFIG_APP_CONSOLE_TASK_PRIORITY: FreeRTOS priority for console REPL task
 */
 
-static const char *TAG = "console_cli";
+static const char *const TAG = "console_cli";
 
 static constexpr char CLI_PROMPT[] = "motion> ";
 static constexpr int64_t MICROSECONDS_PER_SECOND = 1000000;
 
 static esp_console_repl_t *s_repl = nullptr;
-static bool s_initialized = false;
 static console_cli_config_t s_runtime;
+static console_cli_tail_t s_tail_result;
+
+static bool s_initialized = false;
 
 typedef struct {
   const char *name;
@@ -165,6 +167,133 @@ static const console_cli_rate_t *console_cli_find_rate(const char *name) {
   return nullptr;
 }
 
+static esp_err_t console_cli_parse_file_index(const char *text,
+                                              uint16_t *index) {
+  if (text == nullptr || index == nullptr || strlen(text) != 4U) {
+    return ESP_ERR_INVALID_ARG;
+  }
+
+  uint16_t value = 0U;
+
+  for (size_t position = 0U; position < 4U; ++position) {
+    if (text[position] < '0' || text[position] > '9') {
+      return ESP_ERR_INVALID_ARG;
+    }
+
+    value = (uint16_t)(value * 10U + (uint16_t)(text[position] - '0'));
+  }
+
+  if (value == 0U) {
+    return ESP_ERR_INVALID_ARG;
+  }
+
+  *index = value;
+  return ESP_OK;
+}
+
+static int console_cli_list_command(int argc, char **argv) {
+  (void)argv;
+
+  if (argc != 1) {
+    return console_cli_print_usage("list");
+  }
+
+  console_cli_file_list_t result;
+  const esp_err_t err = s_runtime.list_files(s_runtime.context, &result);
+
+  if (err != ESP_OK) {
+    printf("error: list failed: %s\n", esp_err_to_name(err));
+    printf("hint: run 'log off' before file operations\n");
+    return err;
+  }
+
+  if (result.count == 0U) {
+    printf("no telemetry files\n");
+    return ESP_OK;
+  }
+
+  for (size_t index = 0U; index < result.count; ++index) {
+    printf("%04" PRIu16 ".csv  %" PRIu64 " bytes\n", result.files[index].index,
+           result.files[index].size_bytes);
+  }
+
+  return ESP_OK;
+}
+
+static int console_cli_tail_command(int argc, char **argv) {
+  if (argc != 2) {
+    return console_cli_print_usage("tail <NNNN>");
+  }
+
+  uint16_t index;
+  esp_err_t err = console_cli_parse_file_index(argv[1], &index);
+
+  if (err != ESP_OK) {
+    return console_cli_print_usage("tail <NNNN>");
+  }
+
+  err = s_runtime.tail_file(s_runtime.context, index, &s_tail_result);
+
+  if (err != ESP_OK) {
+    printf("error: tail %04" PRIu16 " failed: %s\n", index,
+           esp_err_to_name(err));
+    printf("hint: run 'log off' before file operations\n");
+    return err;
+  }
+
+  for (size_t line = 0U; line < s_tail_result.count; ++line) {
+    fputs(s_tail_result.lines[line], stdout);
+
+    const size_t length = strlen(s_tail_result.lines[line]);
+
+    if (length == 0U || s_tail_result.lines[line][length - 1U] != '\n') {
+      putchar('\n');
+    }
+  }
+
+  return ESP_OK;
+}
+
+static int console_cli_delete_command(int argc, char **argv) {
+  if (argc != 2) {
+    return console_cli_print_usage("delete <NNNN|all>");
+  }
+
+  if (strcmp(argv[1], "all") == 0) {
+    size_t deleted_count;
+    const esp_err_t err =
+        s_runtime.delete_all(s_runtime.context, &deleted_count);
+
+    if (err != ESP_OK) {
+      printf("error: delete all failed: %s\n", esp_err_to_name(err));
+      printf("hint: run 'log off' before file operations\n");
+      return err;
+    }
+
+    printf("deleted %zu telemetry file(s)\n", deleted_count);
+    return ESP_OK;
+  }
+
+  uint16_t index;
+  esp_err_t err = console_cli_parse_file_index(argv[1], &index);
+
+  if (err != ESP_OK) {
+    return console_cli_print_usage("delete <NNNN|all>");
+  }
+
+  err = s_runtime.delete_file(s_runtime.context, index);
+
+  if (err != ESP_OK) {
+    printf("error: delete %04" PRIu16 " failed: %s\n", index,
+           esp_err_to_name(err));
+    printf("hint: run 'log off' before file operations\n");
+    return err;
+  }
+
+  printf("deleted %04" PRIu16 ".csv\n", index);
+  return ESP_OK;
+}
+
 static int console_cli_rate_command(int argc, char **argv) {
   if (argc != 2) {
     return console_cli_print_usage("rate <hz>");
@@ -215,6 +344,7 @@ static int console_cli_stats_command(int argc, char **argv) {
   printf("samples_logged:   %" PRIu64 "\n", state.samples_logged);
   printf("queue_drops:      %" PRIu64 "\n", state.queue_drops);
   printf("i2c_errors:       %" PRIu64 "\n", state.i2c_errors);
+  printf("sensor_reinits:   %" PRIu64 "\n", state.sensor_reinitializations);
   printf("sd_errors:        %" PRIu64 "\n", state.sd_errors);
 
   return ESP_OK;
@@ -266,6 +396,33 @@ static const esp_console_cmd_t s_commands[] = {
         .func_w_context = nullptr,
         .context = nullptr,
     },
+    {
+        .command = "list",
+        .help = "List the five newest telemetry files",
+        .hint = nullptr,
+        .func = console_cli_list_command,
+        .argtable = nullptr,
+        .func_w_context = nullptr,
+        .context = nullptr,
+    },
+    {
+        .command = "tail",
+        .help = "Show the final lines of a telemetry file",
+        .hint = "<NNNN>",
+        .func = console_cli_tail_command,
+        .argtable = nullptr,
+        .func_w_context = nullptr,
+        .context = nullptr,
+    },
+    {
+        .command = "delete",
+        .help = "Delete one or every telemetry file",
+        .hint = "<NNNN|all>",
+        .func = console_cli_delete_command,
+        .argtable = nullptr,
+        .func_w_context = nullptr,
+        .context = nullptr,
+    },
 };
 
 static constexpr size_t COMMAND_COUNT =
@@ -308,7 +465,9 @@ static esp_err_t console_cli_create_repl(void) {
 
 static bool console_cli_config_is_valid(const console_cli_config_t *config) {
   return config != nullptr && config->get_state != nullptr &&
-         config->set_logging != nullptr && config->set_rate != nullptr;
+         config->set_logging != nullptr && config->set_rate != nullptr &&
+         config->list_files != nullptr && config->tail_file != nullptr &&
+         config->delete_file != nullptr && config->delete_all != nullptr;
 }
 
 esp_err_t console_cli_init(const console_cli_config_t *config) {

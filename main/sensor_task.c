@@ -8,20 +8,37 @@
 #include "freertos/semphr.h"
 #include "mma8451q.h"
 #include "sdkconfig.h"
+#include "status_led.h"
+#include <inttypes.h>
 
-static const char *TAG = "sensor_task";
+static const char *const TAG = "sensor_task";
 
 static QueueHandle_t s_sample_queue = nullptr;
 static TaskHandle_t s_task_handle = nullptr;
 static StaticSemaphore_t s_sensor_mutex_storage;
 static SemaphoreHandle_t s_sensor_mutex = nullptr;
 static bool s_gpio_handler_registered = false;
+static volatile bool s_stop_requested = false;
+static TaskHandle_t s_stop_waiter = nullptr;
 
 static constexpr gpio_num_t SENSOR_INT_GPIO =
     (gpio_num_t)CONFIG_APP_MMA8451Q_INT1_GPIO;
 
 static constexpr TickType_t INTERRUPT_TIMEOUT =
     pdMS_TO_TICKS(CONFIG_APP_SENSOR_INTERRUPT_TIMEOUT_MS);
+
+static constexpr TickType_t RECOVERY_INTERVAL =
+    pdMS_TO_TICKS(CONFIG_APP_SENSOR_RECOVERY_INTERVAL_MS);
+
+static constexpr uint32_t ODR_MILLIHZ[] = {
+    800000U, 400000U, 200000U, 100000U, 50000U, 12500U, 6250U, 1560U,
+};
+
+static uint32_t s_consecutive_failures = 0U;
+static TickType_t s_next_recovery_time = 0U;
+
+static mma8451q_odr_t s_current_odr =
+    (mma8451q_odr_t)CONFIG_APP_MMA8451Q_DEFAULT_ODR;
 
 static_assert(CONFIG_APP_MMA8451Q_INT1_GPIO >= 0,
               "MMA8451Q INT1 GPIO must be valid");
@@ -31,6 +48,15 @@ static_assert(CONFIG_APP_MMA8451Q_INT1_GPIO < 64,
 
 static_assert(INTERRUPT_TIMEOUT > 0,
               "Interrupt timeout must produce at least one RTOS tick");
+
+static_assert(RECOVERY_INTERVAL > 0,
+              "Recovery interval must produce at least one RTOS tick");
+
+static_assert(CONFIG_APP_SENSOR_FAILURE_THRESHOLD > 0,
+              "Sensor failure threshold must be positive");
+
+static_assert(sizeof(ODR_MILLIHZ) / sizeof(ODR_MILLIHZ[0]) == 8U,
+              "Every MMA8451Q ODR must have a millihertz value");
 
 static esp_err_t sensor_task_lock(void) {
   if (s_sensor_mutex == nullptr) {
@@ -50,6 +76,99 @@ static void IRAM_ATTR sensor_task_gpio_isr(void *argument) {
 
   vTaskNotifyGiveFromISR(s_task_handle, &higher_priority_task_woken);
   portYIELD_FROM_ISR(higher_priority_task_woken);
+}
+
+static uint32_t sensor_task_odr_millihz(mma8451q_odr_t odr) {
+  const size_t index = (size_t)odr;
+
+  if (index >= sizeof(ODR_MILLIHZ) / sizeof(ODR_MILLIHZ[0])) {
+    return 0U;
+  }
+
+  return ODR_MILLIHZ[index];
+}
+
+static void sensor_task_restore_runtime_led(void) {
+  app_state_snapshot_t state;
+
+  if (app_state_get_snapshot(&state) != ESP_OK) {
+    return;
+  }
+
+  const status_led_state_t led_state =
+      !state.sensor_ready || !state.storage_ready ? STATUS_LED_ERROR
+      : state.logging_enabled                     ? STATUS_LED_LOGGING
+                                                  : STATUS_LED_READY;
+
+  (void)status_led_set_state(led_state);
+}
+
+static esp_err_t sensor_task_reinitialize(void) {
+  (void)gpio_intr_disable(SENSOR_INT_GPIO);
+  (void)app_state_record_sensor_reinitialization();
+
+  esp_err_t err = sensor_task_lock();
+
+  if (err != ESP_OK) {
+    return err;
+  }
+
+  const esp_err_t deinit_err = mma8451q_deinit();
+
+  if (deinit_err != ESP_OK) {
+    ESP_LOGW(TAG, "Sensor cleanup reported: %s", esp_err_to_name(deinit_err));
+    sensor_task_unlock();
+    return deinit_err;
+  }
+
+  err = mma8451q_init();
+
+  if (err == ESP_OK) {
+    err = mma8451q_set_odr(s_current_odr);
+  }
+
+  if (err == ESP_OK) {
+    err = mma8451q_enable_data_ready_interrupt(true);
+  }
+
+  sensor_task_unlock();
+
+  if (err != ESP_OK) {
+    return err;
+  }
+
+  (void)ulTaskNotifyTake(pdTRUE, 0);
+  if (s_stop_requested) {
+    return ESP_ERR_INVALID_STATE;
+  }
+
+  return gpio_intr_enable(SENSOR_INT_GPIO);
+}
+
+static void sensor_task_attempt_recovery(void) {
+  const TickType_t now = xTaskGetTickCount();
+
+  if (s_next_recovery_time != 0U && (int32_t)(now - s_next_recovery_time) < 0) {
+    return;
+  }
+
+  ESP_LOGW(TAG, "Attempting MMA8451Q recovery");
+
+  const esp_err_t err = sensor_task_reinitialize();
+
+  if (err != ESP_OK) {
+    s_next_recovery_time = now + RECOVERY_INTERVAL;
+    ESP_LOGE(TAG, "MMA8451Q recovery failed: %s", esp_err_to_name(err));
+    return;
+  }
+
+  s_consecutive_failures = 0U;
+  s_next_recovery_time = 0U;
+
+  (void)app_state_set_sensor(true, sensor_task_odr_millihz(s_current_odr));
+
+  sensor_task_restore_runtime_led();
+  ESP_LOGI(TAG, "MMA8451Q recovery succeeded");
 }
 
 static void sensor_task_release_gpio(void) {
@@ -111,13 +230,6 @@ static esp_err_t sensor_task_configure_gpio(void) {
     return err;
   }
 
-  err = gpio_intr_enable(SENSOR_INT_GPIO);
-
-  if (err != ESP_OK) {
-    sensor_task_release_gpio();
-    return err;
-  }
-
   ESP_LOGI(TAG, "MMA8451Q INT1 configured on GPIO%d",
            CONFIG_APP_MMA8451Q_INT1_GPIO);
 
@@ -126,7 +238,27 @@ static esp_err_t sensor_task_configure_gpio(void) {
 
 static void sensor_task_handle_read_error(esp_err_t err) {
   (void)app_state_record_i2c_error();
-  ESP_LOGE(TAG, "MMA8451Q sample read failed: %s", esp_err_to_name(err));
+
+  if (s_consecutive_failures < UINT32_MAX) {
+    ++s_consecutive_failures;
+  }
+
+  ESP_LOGW(TAG, "MMA8451Q operation failed (%" PRIu32 "/%d): %s",
+           s_consecutive_failures, CONFIG_APP_SENSOR_FAILURE_THRESHOLD,
+           esp_err_to_name(err));
+
+  if (s_consecutive_failures < CONFIG_APP_SENSOR_FAILURE_THRESHOLD) {
+    return;
+  }
+
+  (void)app_state_set_sensor(false, 0U);
+  (void)status_led_set_state(STATUS_LED_ERROR);
+  sensor_task_attempt_recovery();
+}
+
+static void sensor_task_record_success(void) {
+  s_consecutive_failures = 0U;
+  s_next_recovery_time = 0U;
 }
 
 static void sensor_task_publish(const app_sample_t *sample) {
@@ -149,7 +281,12 @@ sensor_task_read_acceleration(mma8451q_sample_t *acceleration) {
   uint8_t sources = 0;
   err = mma8451q_read_interrupt_source(&sources);
 
-  if (err == ESP_OK && (sources & MMA8451Q_INTERRUPT_DATA_READY) == 0U) {
+  if (err != ESP_OK) {
+    sensor_task_unlock();
+    return err;
+  }
+
+  if ((sources & MMA8451Q_INTERRUPT_DATA_READY) == 0U) {
     sensor_task_unlock();
     return ESP_ERR_NOT_FOUND;
   }
@@ -162,6 +299,22 @@ sensor_task_read_acceleration(mma8451q_sample_t *acceleration) {
   }
 
   return ESP_OK;
+}
+
+static void sensor_task_check_connection(void) {
+  esp_err_t err = sensor_task_lock();
+
+  if (err == ESP_OK) {
+    err = mma8451q_check_connection();
+    sensor_task_unlock();
+  }
+
+  if (err == ESP_OK) {
+    sensor_task_record_success();
+    return;
+  }
+
+  sensor_task_handle_read_error(err);
 }
 
 static void sensor_task_acquire(uint32_t interrupt_count) {
@@ -187,6 +340,8 @@ static void sensor_task_acquire(uint32_t interrupt_count) {
     return;
   }
 
+  sensor_task_record_success();
+
   const app_sample_t sample = {
       .timestamp_us = esp_timer_get_time(),
       .acceleration = acceleration,
@@ -199,29 +354,29 @@ static void sensor_task_acquire(uint32_t interrupt_count) {
 static void sensor_task_run(void *argument) {
   (void)argument;
 
-  while (true) {
+  while (!s_stop_requested) {
     const uint32_t interrupt_count =
         ulTaskNotifyTake(pdTRUE, INTERRUPT_TIMEOUT);
 
-    sensor_task_acquire(interrupt_count);
+    if (interrupt_count > 0U || gpio_get_level(SENSOR_INT_GPIO) == 0) {
+      sensor_task_acquire(interrupt_count);
+      continue;
+    }
+
+    if (s_consecutive_failures >= CONFIG_APP_SENSOR_FAILURE_THRESHOLD) {
+      sensor_task_attempt_recovery();
+      continue;
+    }
+
+    sensor_task_check_connection();
+  }
+
+  if (s_stop_waiter != nullptr) {
+    xTaskNotifyGive(s_stop_waiter);
   }
 }
 
-static void sensor_task_rollback_start(void) {
-  sensor_task_release_gpio();
-
-  if (s_task_handle != nullptr) {
-    vTaskDelete(s_task_handle);
-    s_task_handle = nullptr;
-  }
-
-  if (s_sensor_mutex != nullptr) {
-    vSemaphoreDelete(s_sensor_mutex);
-    s_sensor_mutex = nullptr;
-  }
-
-  s_sample_queue = nullptr;
-}
+static void sensor_task_rollback_start(void) { sensor_task_stop(); }
 
 esp_err_t sensor_task_start(QueueHandle_t sample_queue,
                             TaskHandle_t *task_handle) {
@@ -241,26 +396,49 @@ esp_err_t sensor_task_start(QueueHandle_t sample_queue,
     return ESP_ERR_NO_MEM;
   }
 
+  s_current_odr = (mma8451q_odr_t)CONFIG_APP_MMA8451Q_DEFAULT_ODR;
+  s_consecutive_failures = 0U;
+  s_next_recovery_time = 0U;
+  s_stop_requested = false;
+  s_stop_waiter = nullptr;
+
+  esp_err_t err = sensor_task_configure_gpio();
+
+  if (err != ESP_OK) {
+    vSemaphoreDelete(s_sensor_mutex);
+    s_sensor_mutex = nullptr;
+    s_sample_queue = nullptr;
+    return err;
+  }
+
+  err = sensor_task_lock();
+
+  if (err == ESP_OK) {
+    err = mma8451q_enable_data_ready_interrupt(true);
+    sensor_task_unlock();
+  }
+
+  if (err != ESP_OK) {
+    sensor_task_release_gpio();
+    vSemaphoreDelete(s_sensor_mutex);
+    s_sensor_mutex = nullptr;
+    s_sample_queue = nullptr;
+    return err;
+  }
+
   const BaseType_t result = xTaskCreate(
       sensor_task_run, "sensor_task", CONFIG_APP_SENSOR_TASK_STACK_SIZE,
       nullptr, CONFIG_APP_SENSOR_TASK_PRIORITY, &s_task_handle);
 
   if (result != pdPASS) {
+    sensor_task_release_gpio();
     s_sample_queue = nullptr;
-    s_task_handle = nullptr;
     vSemaphoreDelete(s_sensor_mutex);
     s_sensor_mutex = nullptr;
     return ESP_ERR_NO_MEM;
   }
 
-  esp_err_t err = sensor_task_configure_gpio();
-
-  if (err != ESP_OK) {
-    sensor_task_rollback_start();
-    return err;
-  }
-
-  err = mma8451q_enable_data_ready_interrupt(true);
+  err = gpio_intr_enable(SENSOR_INT_GPIO);
 
   if (err != ESP_OK) {
     sensor_task_rollback_start();
@@ -285,7 +463,16 @@ esp_err_t sensor_task_set_odr(mma8451q_odr_t odr) {
   }
 
   err = mma8451q_set_odr(odr);
+
+  if (err == ESP_OK) {
+    s_current_odr = odr;
+  }
+
   sensor_task_unlock();
+
+  if (err != ESP_OK) {
+    sensor_task_handle_read_error(err);
+  }
 
   return err;
 }
@@ -297,15 +484,23 @@ void sensor_task_stop(void) {
 
   (void)gpio_intr_disable(SENSOR_INT_GPIO);
 
-  const esp_err_t err = mma8451q_enable_data_ready_interrupt(false);
-
-  if (err != ESP_OK) {
-    ESP_LOGW(TAG, "Failed to disable DATA_READY: %s", esp_err_to_name(err));
-  }
+  s_stop_waiter = xTaskGetCurrentTaskHandle();
+  s_stop_requested = true;
+  xTaskNotifyGive(s_task_handle);
+  (void)ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
 
   sensor_task_release_gpio();
 
-  vTaskDelete(s_task_handle);
+  const esp_err_t lock_err = sensor_task_lock();
+  if (lock_err == ESP_OK) {
+    const esp_err_t err = mma8451q_enable_data_ready_interrupt(false);
+    sensor_task_unlock();
+
+    if (err != ESP_OK) {
+      ESP_LOGW(TAG, "Failed to disable DATA_READY: %s", esp_err_to_name(err));
+    }
+  }
+
   if (s_sensor_mutex != nullptr) {
     vSemaphoreDelete(s_sensor_mutex);
     s_sensor_mutex = nullptr;
@@ -313,6 +508,9 @@ void sensor_task_stop(void) {
 
   s_task_handle = nullptr;
   s_sample_queue = nullptr;
+  s_stop_waiter = nullptr;
 
+  s_consecutive_failures = 0U;
+  s_next_recovery_time = 0U;
   ESP_LOGI(TAG, "Sensor task stopped");
 }

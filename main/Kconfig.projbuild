@@ -253,6 +253,22 @@ menu "Motion Telemetry Configuration"
             services the pending sample. This avoids permanent acquisition
             stalls after a missed GPIO edge or transient I2C failure.
 
+      config APP_SENSOR_FAILURE_THRESHOLD
+        int "Consecutive I2C failures before sensor recovery"
+        range 1 20
+        default 5
+        help
+            Number of consecutive sample or health-check failures that mark
+            the sensor unavailable and trigger a reinitialization attempt.
+
+      config APP_SENSOR_RECOVERY_INTERVAL_MS
+        int "Sensor reinitialization retry interval in milliseconds"
+        range 1000 60000
+        default 5000
+        help
+            Minimum delay between MMA8451Q reinitialization attempts while
+            the sensor remains unavailable.
+
       config APP_SENSOR_TASK_STACK_SIZE
         int "Sensor task stack size"
         range 2048 8192

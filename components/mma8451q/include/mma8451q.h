@@ -100,6 +100,17 @@ typedef struct {
 esp_err_t mma8451q_init(void);
 
 /**
+ * @brief Verify that the initialized device still identifies as an MMA8451Q.
+ *
+ * @return
+ *      - ESP_OK when WHO_AM_I is readable and correct.
+ *      - ESP_ERR_INVALID_STATE when the driver is not initialized.
+ *      - ESP_ERR_NOT_FOUND when WHO_AM_I contains an unexpected value.
+ *      - Another I2C error when the device cannot be read.
+ */
+esp_err_t mma8451q_check_connection(void);
+
+/**
  * @brief Remove the sensor device and release the owned I2C bus.
  *
  * @return
@@ -181,8 +192,7 @@ esp_err_t mma8451q_enable_orientation(bool enable);
  *
  * @return ESP_OK on success or an argument, state, or I2C error.
  */
-esp_err_t
-mma8451q_read_orientation(mma8451q_orientation_status_t *status);
+esp_err_t mma8451q_read_orientation(mma8451q_orientation_status_t *status);
 
 #ifdef __cplusplus
 }

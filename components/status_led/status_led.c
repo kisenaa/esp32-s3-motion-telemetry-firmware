@@ -10,13 +10,12 @@
 #include <stddef.h>
 #include <stdint.h>
 
-
 /* Pin Mapping Used
   - CONFIG_APP_STATUS_RGB_LED_GPIO: (WS2812 RGB LED)
   - CONFIG_APP_STATUS_ACTIVITY_LED_GPIO:(External Activity LED)
 */
 
-static const char *TAG = "status_led";
+static const char *const TAG = "status_led";
 
 static constexpr uint32_t RGB_LED_COUNT = 1U;
 static constexpr uint32_t RGB_LED_INDEX = 0U;

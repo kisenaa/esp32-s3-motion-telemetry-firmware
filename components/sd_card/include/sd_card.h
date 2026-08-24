@@ -2,6 +2,7 @@
 #define SD_CARD_H
 
 #include "esp_err.h"
+#include <stddef.h>
 #include <stdint.h>
 
 #ifdef __cplusplus
@@ -22,6 +23,28 @@ typedef struct {
   float y_g;
   float z_g;
 } sd_card_record_t;
+
+enum {
+  SD_CARD_FILE_INDEX_MAX = 9999U,
+  SD_CARD_LIST_LIMIT = 5U,
+  SD_CARD_TAIL_LINE_COUNT = 10U,
+  SD_CARD_CSV_LINE_CAPACITY = 128U,
+};
+
+typedef struct {
+  uint16_t index;
+  uint64_t size_bytes;
+} sd_card_file_info_t;
+
+typedef struct {
+  size_t count;
+  sd_card_file_info_t files[SD_CARD_LIST_LIMIT];
+} sd_card_file_list_t;
+
+typedef struct {
+  size_t count;
+  char lines[SD_CARD_TAIL_LINE_COUNT][SD_CARD_CSV_LINE_CAPACITY];
+} sd_card_tail_t;
 
 /**
  * @brief Initialize the SDSPI bus and mount the SD card filesystem.
@@ -93,12 +116,60 @@ esp_err_t sd_card_flush(void);
 esp_err_t sd_card_stop(void);
 
 /**
+ * @brief List up to five newest indexed telemetry files.
+ *
+ * Logging must be disabled while this operation runs.
+ *
+ * @param result Destination for files ordered newest first.
+ *
+ * @return ESP_OK on success or an argument, state, or filesystem error.
+ */
+esp_err_t sd_card_list_files(sd_card_file_list_t *result);
+
+/**
+ * @brief Read the final telemetry lines from an indexed CSV file.
+ *
+ * Logging must be disabled while this operation runs.
+ *
+ * @param index Four-digit telemetry session index.
+ * @param result Destination for up to SD_CARD_TAIL_LINE_COUNT lines.
+ *
+ * @return ESP_OK on success or an argument, state, not-found, or I/O error.
+ */
+esp_err_t sd_card_tail_file(uint16_t index, sd_card_tail_t *result);
+
+/**
+ * @brief Delete one indexed telemetry CSV file.
+ *
+ * Logging must be disabled while this operation runs.
+ *
+ * @param index Four-digit telemetry session index.
+ *
+ * @return ESP_OK on success or an argument, state, not-found, or I/O error.
+ */
+esp_err_t sd_card_delete_file(uint16_t index);
+
+/**
+ * @brief Delete every indexed telemetry CSV file.
+ *
+ * Logging must be disabled while this operation runs.
+ *
+ * @param deleted_count Destination for the number of removed files.
+ *
+ * @return ESP_OK on success or an argument, state, or filesystem error.
+ */
+esp_err_t sd_card_delete_all(size_t *deleted_count);
+
+/**
  * @brief Stop logging, unmount the filesystem, and release the SPI bus.
  *
- * Errors encountered during cleanup are logged internally. Calling this
- * function when the component is not initialized has no effect.
+ * Retains ownership of any resource that cannot be released so a later call
+ * can retry cleanup. Calling this function when no resource is owned has no
+ * effect.
+ *
+ * @return ESP_OK when all owned resources are released or an error otherwise.
  */
-void sd_card_deinit(void);
+esp_err_t sd_card_deinit(void);
 
 #ifdef __cplusplus
 }

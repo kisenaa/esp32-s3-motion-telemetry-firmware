@@ -36,6 +36,7 @@ typedef struct {
   uint64_t samples_logged;
   uint64_t queue_drops;
   uint64_t i2c_errors;
+  uint64_t sensor_reinitializations;
   uint64_t sd_errors;
 } app_state_snapshot_t;
 
@@ -96,6 +97,14 @@ esp_err_t app_state_record_sensor_interrupts(uint32_t count);
 esp_err_t app_state_record_logged_sample(void);
 esp_err_t app_state_record_queue_drop(void);
 esp_err_t app_state_record_i2c_error(void);
+
+/**
+ * @brief Record one attempted sensor reinitialization.
+ *
+ * @return ESP_OK on success or ESP_ERR_INVALID_STATE before initialization.
+ */
+esp_err_t app_state_record_sensor_reinitialization(void);
+
 esp_err_t app_state_record_sd_error(void);
 
 /**

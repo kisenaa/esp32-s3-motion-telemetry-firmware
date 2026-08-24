@@ -13,11 +13,23 @@
 #include "status_led.h"
 #include <string.h>
 
-static const char *TAG = "main";
+static const char *const TAG = "main";
 
 static QueueHandle_t s_sample_queue = nullptr;
 static TaskHandle_t s_sensor_task = nullptr;
 static TaskHandle_t s_logger_task = nullptr;
+static sd_card_tail_t s_cli_tail_source;
+
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wenum-compare"
+static_assert(CONSOLE_CLI_FILE_LIST_LIMIT == SD_CARD_LIST_LIMIT,
+              "CLI and storage list capacities must match");
+
+static_assert(CONSOLE_CLI_TAIL_LINE_COUNT == SD_CARD_TAIL_LINE_COUNT,
+              "CLI and storage tail capacities must match");
+
+static_assert(CONSOLE_CLI_CSV_LINE_CAPACITY == SD_CARD_CSV_LINE_CAPACITY,
+              "CLI and storage line capacities must match");
 
 static uint32_t app_default_rate_millihz(void) {
   static constexpr uint32_t RATES[] = {
@@ -26,6 +38,7 @@ static uint32_t app_default_rate_millihz(void) {
 
   return RATES[CONFIG_APP_MMA8451Q_DEFAULT_ODR];
 }
+#pragma GCC diagnostic pop
 
 static esp_err_t app_odr_from_millihz(uint32_t millihz, mma8451q_odr_t *odr) {
   if (odr == nullptr) {
@@ -83,6 +96,7 @@ static void app_cli_copy_counters(const app_state_snapshot_t *source,
   destination->samples_logged = source->samples_logged;
   destination->queue_drops = source->queue_drops;
   destination->i2c_errors = source->i2c_errors;
+  destination->sensor_reinitializations = source->sensor_reinitializations;
   destination->sd_errors = source->sd_errors;
 }
 
@@ -139,6 +153,67 @@ static esp_err_t app_cli_set_rate(void *context, uint32_t rate_millihz) {
   return app_state_set_sensor(true, rate_millihz);
 }
 
+static esp_err_t app_cli_list_files(void *context,
+                                    console_cli_file_list_t *destination) {
+  (void)context;
+
+  if (destination == nullptr) {
+    return ESP_ERR_INVALID_ARG;
+  }
+
+  sd_card_file_list_t source;
+  const esp_err_t err = logger_task_list_files(&source);
+
+  if (err != ESP_OK) {
+    return err;
+  }
+
+  memset(destination, 0, sizeof(*destination));
+  destination->count = source.count;
+
+  for (size_t index = 0U; index < source.count; ++index) {
+    destination->files[index].index = source.files[index].index;
+    destination->files[index].size_bytes = source.files[index].size_bytes;
+  }
+
+  return ESP_OK;
+}
+
+static esp_err_t app_cli_tail_file(void *context, uint16_t index,
+                                   console_cli_tail_t *destination) {
+  (void)context;
+
+  if (destination == nullptr) {
+    return ESP_ERR_INVALID_ARG;
+  }
+
+  const esp_err_t err = logger_task_tail_file(index, &s_cli_tail_source);
+
+  if (err != ESP_OK) {
+    return err;
+  }
+
+  memset(destination, 0, sizeof(*destination));
+  destination->count = s_cli_tail_source.count;
+
+  for (size_t line = 0U; line < s_cli_tail_source.count; ++line) {
+    memcpy(destination->lines[line], s_cli_tail_source.lines[line],
+           sizeof(destination->lines[line]));
+  }
+
+  return ESP_OK;
+}
+
+static esp_err_t app_cli_delete_file(void *context, uint16_t index) {
+  (void)context;
+  return logger_task_delete_file(index);
+}
+
+static esp_err_t app_cli_delete_all(void *context, size_t *deleted_count) {
+  (void)context;
+  return logger_task_delete_all(deleted_count);
+}
+
 static bool app_initialize_storage(void) {
   esp_err_t err = sd_card_init();
 
@@ -155,7 +230,7 @@ static bool app_initialize_storage(void) {
   if (err != ESP_OK) {
     ESP_LOGE(TAG, "CSV start failed; logging disabled: %s",
              esp_err_to_name(err));
-    sd_card_deinit();
+    (void)sd_card_deinit();
     (void)app_state_set_storage(false, false);
     return false;
   }
@@ -182,7 +257,7 @@ static void app_cleanup_startup_failure(bool storage_ready) {
     (void)sd_card_stop();
   }
 
-  sd_card_deinit();
+  (void)sd_card_deinit();
   (void)mma8451q_deinit();
   app_state_deinit();
 }
@@ -269,8 +344,11 @@ void app_main(void) {
       .get_state = app_cli_get_state,
       .set_logging = app_cli_set_logging,
       .set_rate = app_cli_set_rate,
+      .list_files = app_cli_list_files,
+      .tail_file = app_cli_tail_file,
+      .delete_file = app_cli_delete_file,
+      .delete_all = app_cli_delete_all,
   };
-
   err = console_cli_init(&cli_config);
 
   if (err != ESP_OK) {
@@ -295,5 +373,5 @@ void app_main(void) {
     ESP_LOGE(TAG, "Failed to set runtime LED state: %s", esp_err_to_name(err));
   }
 
-  ESP_LOGI(TAG, "Phase 7 acquisition pipeline running");
+  ESP_LOGI(TAG, "Motion telemetry pipeline running");
 }

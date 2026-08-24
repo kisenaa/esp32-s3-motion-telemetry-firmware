@@ -6,10 +6,22 @@
 #include "sdkconfig.h"
 #include "status_led.h"
 
-static const char *TAG = "logger_task";
+static const char *const TAG = "logger_task";
+
+typedef enum {
+  LOGGER_CONTROL_SET_LOGGING,
+  LOGGER_CONTROL_LIST_FILES,
+  LOGGER_CONTROL_TAIL_FILE,
+  LOGGER_CONTROL_DELETE_FILE,
+  LOGGER_CONTROL_DELETE_ALL,
+  LOGGER_CONTROL_STOP,
+} logger_control_operation_t;
 
 typedef struct {
+  logger_control_operation_t operation;
   bool enable;
+  uint16_t file_index;
+  void *output;
 } logger_control_command_t;
 
 static QueueHandle_t s_sample_queue = nullptr;
@@ -19,6 +31,8 @@ static QueueHandle_t s_control_result_queue = nullptr;
 static QueueSetHandle_t s_queue_set = nullptr;
 static StaticSemaphore_t s_control_mutex_storage;
 static SemaphoreHandle_t s_control_mutex = nullptr;
+static volatile bool s_stop_requested = false;
+static TaskHandle_t s_stop_waiter = nullptr;
 
 static constexpr TickType_t FLUSH_INTERVAL =
     pdMS_TO_TICKS(CONFIG_APP_LOGGER_FLUSH_INTERVAL_MS);
@@ -41,12 +55,30 @@ static sd_card_record_t logger_task_make_record(const app_sample_t *sample) {
   };
 }
 
+static void logger_task_restore_runtime_led(void) {
+  app_state_snapshot_t state;
+
+  if (app_state_get_snapshot(&state) != ESP_OK) {
+    return;
+  }
+
+  const status_led_state_t led_state =
+      !state.sensor_ready || !state.storage_ready ? STATUS_LED_ERROR
+      : state.logging_enabled                     ? STATUS_LED_LOGGING
+                                                  : STATUS_LED_READY;
+
+  (void)status_led_set_state(led_state);
+}
+
 static void logger_task_disable_storage(const char *operation, esp_err_t err) {
   ESP_LOGE(TAG, "%s failed: %s", operation, esp_err_to_name(err));
 
   (void)app_state_record_sd_error();
   (void)app_state_set_storage(false, false);
-  sd_card_deinit();
+  const esp_err_t cleanup_err = sd_card_deinit();
+  if (cleanup_err != ESP_OK) {
+    ESP_LOGW(TAG, "SD cleanup incomplete: %s", esp_err_to_name(cleanup_err));
+  }
   (void)status_led_set_state(STATUS_LED_ERROR);
 }
 
@@ -58,12 +90,20 @@ static esp_err_t logger_task_enable_logging(void) {
     return err;
   }
 
-  if (!state.storage_ready) {
-    return ESP_ERR_INVALID_STATE;
-  }
-
   if (state.logging_enabled) {
     return ESP_OK;
+  }
+
+  if (!state.storage_ready) {
+    err = sd_card_init();
+
+    if (err != ESP_OK) {
+      (void)app_state_record_sd_error();
+      (void)status_led_set_state(STATUS_LED_ERROR);
+      return err;
+    }
+
+    (void)app_state_set_storage(true, false);
   }
 
   err = sd_card_start();
@@ -74,7 +114,7 @@ static esp_err_t logger_task_enable_logging(void) {
   }
 
   (void)app_state_set_storage(true, true);
-  (void)status_led_set_state(STATUS_LED_LOGGING);
+  logger_task_restore_runtime_led();
   return ESP_OK;
 }
 
@@ -102,14 +142,74 @@ static esp_err_t logger_task_disable_logging(void) {
   }
 
   (void)app_state_set_storage(true, false);
-  (void)status_led_set_state(STATUS_LED_READY);
+  logger_task_restore_runtime_led();
+  return ESP_OK;
+}
+
+static esp_err_t logger_task_check_management_state(void) {
+  app_state_snapshot_t state;
+  const esp_err_t err = app_state_get_snapshot(&state);
+
+  if (err != ESP_OK) {
+    return err;
+  }
+
+  if (!state.storage_ready || state.logging_enabled) {
+    return ESP_ERR_INVALID_STATE;
+  }
+
   return ESP_OK;
 }
 
 static esp_err_t
 logger_task_apply_control(const logger_control_command_t *command) {
-  return command->enable ? logger_task_enable_logging()
-                         : logger_task_disable_logging();
+  if (command == nullptr) {
+    return ESP_ERR_INVALID_ARG;
+  }
+
+  if (command->operation == LOGGER_CONTROL_SET_LOGGING) {
+    return command->enable ? logger_task_enable_logging()
+                           : logger_task_disable_logging();
+  }
+
+  if (command->operation == LOGGER_CONTROL_STOP) {
+    s_stop_requested = true;
+    return ESP_OK;
+  }
+
+  esp_err_t err = logger_task_check_management_state();
+
+  if (err != ESP_OK) {
+    return err;
+  }
+
+  switch (command->operation) {
+  case LOGGER_CONTROL_LIST_FILES:
+    err = sd_card_list_files(command->output);
+    break;
+
+  case LOGGER_CONTROL_TAIL_FILE:
+    err = sd_card_tail_file(command->file_index, command->output);
+    break;
+
+  case LOGGER_CONTROL_DELETE_FILE:
+    err = sd_card_delete_file(command->file_index);
+    break;
+
+  case LOGGER_CONTROL_DELETE_ALL:
+    err = sd_card_delete_all(command->output);
+    break;
+
+  default:
+    err = ESP_ERR_INVALID_ARG;
+    break;
+  }
+
+  if (err == ESP_FAIL) {
+    logger_task_disable_storage("SD management operation", err);
+  }
+
+  return err;
 }
 
 static bool logger_task_flush_if_needed(size_t *pending_records,
@@ -125,7 +225,7 @@ static bool logger_task_flush_if_needed(size_t *pending_records,
     return true;
   }
 
-  esp_err_t err = sd_card_flush();
+  const esp_err_t err = sd_card_flush();
 
   if (err != ESP_OK) {
     logger_task_disable_storage("SD flush", err);
@@ -182,8 +282,8 @@ static void logger_task_process_control(size_t *pending_records,
 
   const esp_err_t result = logger_task_apply_control(&command);
 
-  if (result == ESP_OK) {
-    *pending_records = 0;
+  if (result == ESP_OK && command.operation == LOGGER_CONTROL_SET_LOGGING) {
+    *pending_records = 0U;
     *last_flush_time = xTaskGetTickCount();
   }
 
@@ -197,7 +297,7 @@ static void logger_task_run(void *argument) {
   TickType_t last_flush_time = xTaskGetTickCount();
   TickType_t last_activity_time = last_flush_time;
 
-  while (true) {
+  while (!s_stop_requested) {
     TickType_t wait = portMAX_DELAY;
 
     if (pending_records > 0U) {
@@ -228,6 +328,10 @@ static void logger_task_run(void *argument) {
       }
     }
   }
+
+  if (s_stop_waiter != nullptr) {
+    xTaskNotifyGive(s_stop_waiter);
+  }
 }
 
 static void logger_task_delete_control_queues(void) {
@@ -255,7 +359,6 @@ static void logger_task_delete_control_queues(void) {
 static esp_err_t logger_task_create_control_queues(void) {
   s_control_mutex = xSemaphoreCreateMutexStatic(&s_control_mutex_storage);
   s_control_queue = xQueueCreate(1, sizeof(logger_control_command_t));
-
   s_control_result_queue = xQueueCreate(1, sizeof(esp_err_t));
 
   if (s_control_mutex == nullptr || s_control_queue == nullptr ||
@@ -285,6 +388,33 @@ static esp_err_t logger_task_create_control_queues(void) {
   return ESP_OK;
 }
 
+static esp_err_t logger_task_execute(const logger_control_command_t *command,
+                                     esp_err_t *result) {
+  if (command == nullptr || result == nullptr) {
+    return ESP_ERR_INVALID_ARG;
+  }
+
+  if (s_task_handle == nullptr || s_control_queue == nullptr ||
+      s_control_result_queue == nullptr || s_control_mutex == nullptr) {
+    return ESP_ERR_INVALID_STATE;
+  }
+
+  if (xSemaphoreTake(s_control_mutex, portMAX_DELAY) != pdTRUE) {
+    return ESP_FAIL;
+  }
+
+  xQueueReset(s_control_result_queue);
+
+  if (xQueueSend(s_control_queue, command, portMAX_DELAY) != pdTRUE ||
+      xQueueReceive(s_control_result_queue, result, portMAX_DELAY) != pdTRUE) {
+    xSemaphoreGive(s_control_mutex);
+    return ESP_FAIL;
+  }
+
+  xSemaphoreGive(s_control_mutex);
+  return *result;
+}
+
 esp_err_t logger_task_start(QueueHandle_t sample_queue,
                             TaskHandle_t *task_handle) {
   if (sample_queue == nullptr || task_handle == nullptr) {
@@ -296,6 +426,8 @@ esp_err_t logger_task_start(QueueHandle_t sample_queue,
   }
 
   s_sample_queue = sample_queue;
+  s_stop_requested = false;
+  s_stop_waiter = nullptr;
 
   esp_err_t err = logger_task_create_control_queues();
 
@@ -320,35 +452,71 @@ esp_err_t logger_task_start(QueueHandle_t sample_queue,
 }
 
 esp_err_t logger_task_set_logging(bool enable) {
-  if (s_task_handle == nullptr || s_control_queue == nullptr ||
-      s_control_result_queue == nullptr || s_control_mutex == nullptr) {
-    return ESP_ERR_INVALID_STATE;
-  }
+  const logger_control_command_t command = {
+      .operation = LOGGER_CONTROL_SET_LOGGING,
+      .enable = enable,
+      .file_index = 0U,
+  };
 
-  if (xSemaphoreTake(s_control_mutex, portMAX_DELAY) != pdTRUE) {
-    return ESP_FAIL;
+  esp_err_t result;
+  return logger_task_execute(&command, &result);
+}
+
+esp_err_t logger_task_list_files(sd_card_file_list_t *result) {
+  if (result == nullptr) {
+    return ESP_ERR_INVALID_ARG;
   }
 
   const logger_control_command_t command = {
-      .enable = enable,
+      .operation = LOGGER_CONTROL_LIST_FILES,
+      .output = result,
   };
 
-  xQueueReset(s_control_result_queue);
+  esp_err_t response;
+  return logger_task_execute(&command, &response);
+}
 
-  if (xQueueSend(s_control_queue, &command, portMAX_DELAY) != pdTRUE) {
-    xSemaphoreGive(s_control_mutex);
-    return ESP_FAIL;
+esp_err_t logger_task_tail_file(uint16_t index, sd_card_tail_t *result) {
+  if (result == nullptr || index == 0U) {
+    return ESP_ERR_INVALID_ARG;
   }
 
-  esp_err_t result;
+  const logger_control_command_t command = {
+      .operation = LOGGER_CONTROL_TAIL_FILE,
+      .file_index = index,
+      .output = result,
+  };
 
-  if (xQueueReceive(s_control_result_queue, &result, portMAX_DELAY) != pdTRUE) {
-    xSemaphoreGive(s_control_mutex);
-    return ESP_FAIL;
+  esp_err_t response;
+  return logger_task_execute(&command, &response);
+}
+
+esp_err_t logger_task_delete_file(uint16_t index) {
+  if (index == 0U) {
+    return ESP_ERR_INVALID_ARG;
   }
 
-  xSemaphoreGive(s_control_mutex);
-  return result;
+  const logger_control_command_t command = {
+      .operation = LOGGER_CONTROL_DELETE_FILE,
+      .file_index = index,
+  };
+
+  esp_err_t response;
+  return logger_task_execute(&command, &response);
+}
+
+esp_err_t logger_task_delete_all(size_t *deleted_count) {
+  if (deleted_count == nullptr) {
+    return ESP_ERR_INVALID_ARG;
+  }
+
+  const logger_control_command_t command = {
+      .operation = LOGGER_CONTROL_DELETE_ALL,
+      .output = deleted_count,
+  };
+
+  esp_err_t response;
+  return logger_task_execute(&command, &response);
 }
 
 void logger_task_stop(void) {
@@ -356,10 +524,22 @@ void logger_task_stop(void) {
     return;
   }
 
-  vTaskDelete(s_task_handle);
+  const logger_control_command_t command = {
+      .operation = LOGGER_CONTROL_STOP,
+  };
+  esp_err_t result;
+
+  s_stop_waiter = xTaskGetCurrentTaskHandle();
+  if (logger_task_execute(&command, &result) != ESP_OK) {
+    s_stop_waiter = nullptr;
+    return;
+  }
+
+  (void)ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
   s_task_handle = nullptr;
   logger_task_delete_control_queues();
   s_sample_queue = nullptr;
+  s_stop_waiter = nullptr;
 
   ESP_LOGI(TAG, "Logger task stopped");
 }
