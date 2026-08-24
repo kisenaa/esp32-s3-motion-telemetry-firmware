@@ -5,23 +5,9 @@ accelerometer and an SDSPI microSD card. It acquires samples from the
 sensor's DATA_READY interrupt, writes optional indexed CSV sessions, and
 provides runtime control through a UART REPL.
 
-<div>
-
-<div align="center">
-
-https://github.com/user-attachments/assets/07451c9f-f951-4f3a-a432-02f33cbec28d
-
-</div>
-
-<div align="center">
-
- <img src="https://github.com/user-attachments/assets/93fd87bc-9ac0-4bd7-ad8b-949be9526ed9"
-      width="40%"
-      alt="image" />
-</div>
-  
-</div>
-
+| | |
+| :---: | :---: |
+| <video src="https://github.com/user-attachments/assets/07451c9f-f951-4f3a-a432-02f33cbec28d" width="50%"></video> | <img src="https://github.com/user-attachments/assets/93fd87bc-9ac0-4bd7-ad8b-949be9526ed9" width="80%" alt="image" /> |
 
 ## Table of Contents
 
